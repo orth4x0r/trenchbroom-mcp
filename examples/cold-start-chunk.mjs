@@ -46,6 +46,8 @@ const room = async (x, y, z, w, h, d, tex, mats = {}) => {
 
 // A / Maintenance Bay
 await room(12, 1, 8, 22, 7, 16, "panel", { floor: "concrete", ceil: "dark_steel" });
+const bayIn = BOX(12, 1, 8, 22, 7, 16);
+await call("add_room_trim", { ...bayIn, base_height: 0.3 * U, cornice_height: 0.3 * U, depth: 0.15 * U, rib_every: 4 * U, rib_width: 0.4 * U, pilasters: true, base_texture: "trim_wall_base", rib_texture: "plate_steel_b", bevel: 0.05 * U, openings: [BOX(33, 1, 14, 2, 4, 4)] });
 await box(12, 1, 8, 22, 3, 2, "dark_steel"); await box(12, 1, 22, 10, 2, 2, "teal_steel");
 await box(26, 1, 20, 4, 1, 4, "grate"); await box(28, 2, 21, 2, 1, 3, "grate");
 await call("add_entity", { classname: "info_player_start", origin: P(17, 1.02, 16), properties: { angle: "90" } });
@@ -53,6 +55,8 @@ await call("add_entity", { classname: "light", origin: P(22, 7, 16), properties:
 
 // B / Service Corridor with pipe racks, an arched mouth, a hazard-striped floor strip
 await room(35, 1, 13, 36, 6, 6, "dark_steel", { floor: "grate", ceil: "panel" });
+const corIn = BOX(35, 1, 13, 36, 6, 6);
+await call("add_room_trim", { ...corIn, base_height: 0.3 * U, cornice_height: 0.3 * U, depth: 0.12 * U, rib_every: 4 * U, rib_width: 0.35 * U, base_texture: "trim_wall_base", rib_texture: "plate_steel_b", bevel: 0.04 * U, openings: [BOX(34, 1, 14, 2, 4, 4), BOX(70, 1, 14, 2, 5, 4)] });
 await cut(34, 1, 14, 1, 4, 4);                                         // doorway from the bay
 await call("add_arch", { center: P(34.5, 1 + 2.5, 16), axis: "y", inner: 2 * U, outer: 2.6 * U, depth: 1 * U, segments: 8, texture: "orange_trim" });
 for (const z of [14.2, 17.8]) await call("add_pipe", { from: P(35, 5, z), to: P(71, 5, z), radius: 0.35 * U, sides: 8, texture: "pipe" });

@@ -329,6 +329,7 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | Pipes/beams at any angle, columns, n-gons | add_pipe, add_brush_cylinder, add_brush_prism | done |
 | Any convex shape (chamfered pillars, tapered legs) | add_brush_hull | done |
 | Chamfer/bevel, per edge set | bevel_brush (all, vertical, horizontal, top, bottom) | done |
+| Room dressing (base trim, cornice, ribs, pilasters, skipping openings) | add_room_trim | done |
 | Rooms, doors, windows, trenches (CSG) | hollow_brush, subtract_box, subtract_path | done |
 | Brush booleans (A-B, A and B, A or B) | subtract_brush, intersect_brushes, union_brushes (merges to one hull when the union is convex, else a non-overlapping set) | done |
 | Clip/split, rotate, mirror, arrays | clip_brush, rotate_brush, clone_brushes | done |

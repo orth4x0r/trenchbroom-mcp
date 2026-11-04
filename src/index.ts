@@ -1182,6 +1182,77 @@ tool(
     })
 );
 
+tool(
+  "add_room_trim",
+  "Dress the inside of a room (interior box min..max in map units): bevelled base trim and ceiling cornice round all four walls, optional vertical ribs every `rib_every` units along each wall, and optional corner pilasters. Pieces are bevelled hulls (real silhouette, one brush each). `openings` are boxes (doorways, windows) the trim must skip; pieces overlapping an opening are cut around it." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, min: vec3Schema, max: vec3Schema,
+    base_height: z.number().positive().optional().describe("Default 2"), cornice_height: z.number().positive().optional().describe("Default 2"),
+    depth: z.number().positive().optional().describe("How far trim sticks out of the wall; default 1"),
+    rib_every: z.number().positive().optional(), rib_width: z.number().positive().optional(), pilasters: z.boolean().optional(),
+    base_texture: z.string(), cornice_texture: z.string().optional(), rib_texture: z.string().optional(),
+    bevel: z.number().positive().optional().describe("Default 0.4 units"),
+    openings: z.array(z.object({ min: vec3Schema, max: vec3Schema })).optional(),
+    entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, min, max, base_height, cornice_height, depth, rib_every, rib_width, pilasters, base_texture, cornice_texture, rib_texture, bevel, openings, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const valve = shouldWriteValve(map, map_path);
+      const bh = base_height ?? 2, ch = cornice_height ?? 2, dp = depth ?? 1, bv = bevel ?? 0.4;
+      const ct = cornice_texture ?? base_texture, rt = rib_texture ?? base_texture;
+      const lo = min as Vec3, hi = max as Vec3;
+      const pieces: { a: Vec3; b: Vec3; tex: string }[] = [];
+      const wall = (from: Vec3, to: Vec3, inward: [number, number], z0: number, z1: number, tex: string) => {
+        // a slab hugging the wall from `from` to `to`, `dp` thick toward the room
+        const x0 = Math.min(from[0], to[0]) + Math.min(0, inward[0] * dp), x1 = Math.max(from[0], to[0]) + Math.max(0, inward[0] * dp);
+        const y0 = Math.min(from[1], to[1]) + Math.min(0, inward[1] * dp), y1 = Math.max(from[1], to[1]) + Math.max(0, inward[1] * dp);
+        pieces.push({ a: [x0, y0, z0], b: [x1, y1, z1], tex });
+      };
+      const sides: { from: Vec3; to: Vec3; inward: [number, number] }[] = [
+        { from: [lo[0], lo[1], 0], to: [hi[0], lo[1], 0], inward: [0, 1] },
+        { from: [lo[0], hi[1], 0], to: [hi[0], hi[1], 0], inward: [0, -1] },
+        { from: [lo[0], lo[1], 0], to: [lo[0], hi[1], 0], inward: [1, 0] },
+        { from: [hi[0], lo[1], 0], to: [hi[0], hi[1], 0], inward: [-1, 0] },
+      ];
+      for (const s of sides) {
+        wall(s.from, s.to, s.inward, lo[2], lo[2] + bh, base_texture);
+        wall(s.from, s.to, s.inward, hi[2] - ch, hi[2], ct);
+        if (rib_every) {
+          const alongX = s.from[1] === s.to[1];
+          const len = alongX ? hi[0] - lo[0] : hi[1] - lo[1];
+          const rw = rib_width ?? 2;
+          for (let d = rib_every; d < len - rw; d += rib_every) {
+            const f: Vec3 = alongX ? [lo[0] + d, s.from[1], 0] : [s.from[0], lo[1] + d, 0];
+            const t: Vec3 = alongX ? [lo[0] + d + rw, s.to[1], 0] : [s.to[0], lo[1] + d + rw, 0];
+            wall(f, t, s.inward, lo[2] + bh, hi[2] - ch, rt);
+          }
+        }
+      }
+      if (pilasters) {
+        const ps = Math.max(dp * 2, 3);
+        for (const [cx, cy] of [[lo[0], lo[1]], [hi[0], lo[1]], [lo[0], hi[1]], [hi[0], hi[1]]]) {
+          const sx = cx === lo[0] ? 1 : -1, sy = cy === lo[1] ? 1 : -1;
+          pieces.push({ a: [Math.min(cx, cx + sx * ps), Math.min(cy, cy + sy * ps), lo[2] + bh], b: [Math.max(cx, cx + sx * ps), Math.max(cy, cy + sy * ps), hi[2] - ch], tex: rt });
+        }
+      }
+      const cutters = (openings ?? []).map((o) => boxSolid(o.min as Vec3, o.max as Vec3, base_texture, valve));
+      let made = 0;
+      for (const p of pieces) {
+        let solids: Solid[] = [bevelSolid(boxSolid(p.a, p.b, p.tex, valve), Math.min(bv, (Math.min(p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]) / 2) - 0.01), p.tex, valve, "all")];
+        for (const c of cutters) {
+          solids = solids.flatMap((s) => (intersects(s, c) ? subtract(s, c) : [s]));
+        }
+        for (const s of solids) {
+          if (!isValidSolid(s)) continue;
+          e.brushes.push(brushFromSolid(s, p.tex, valve, snap));
+          made++;
+        }
+      }
+      return { trimBrushes: made };
+    })
+);
+
 // ---------- start ----------
 
 const transport = new StdioServerTransport();
