@@ -1030,6 +1030,7 @@ tool(
         if (bb) {
           const dims = [0, 1, 2].map((i) => bb.max[i] - bb.min[i]);
           if (Math.min(...dims) < 1) add(`thinner than 1 unit (${Math.min(...dims).toFixed(2)})`);
+          else if (Math.min(...dims) < 0.25 * units) add(`thinner than 0.25 m (${(Math.min(...dims) / units).toFixed(2)} m): the game's level validator needs hull boxes of at least 0.25 m; map-level.mjs grows them`);
           if (size.length === 3 && size.every((x) => x > 0)) {
             const lim = [size[0] * units, size[2] * units, size[1] * units]; // map x, y(level z), z(level y)
             for (let i = 0; i < 3; i++) if (bb.min[i] < -0.5 || bb.max[i] > lim[i] + 0.5) { add(`outside level bounds on map axis ${"xyz"[i]}`); break; }
