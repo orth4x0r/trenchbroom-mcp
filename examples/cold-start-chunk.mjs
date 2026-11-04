@@ -64,10 +64,12 @@ for (const z of [14.2, 17.8]) await call("add_pipe", { from: P(35, 5, z), to: P(
 await box(46, 1, 13, 2, 2, 2, "rust_plate"); await box(58, 1, 17, 2, 2, 2, "rust_plate");
 await box(64, 1, 13, 4, 1, 2, "plate_steel");
 
+await cut(71, 1, 14, 1, 5, 4);                                        // corridor mouth opens to the docks (always)
+const DOCKS = process.env.DOCKS === "1"; // the docks section only makes sense when the region is also replaced in the level
+if (DOCKS) {
 // C / Loading Docks entry: open yard walls, a long dock slab with warning trim, containers, ramp, stairs, catwalk, pillars
 await box(72, 0, 5, 64, 1, 52, "asphalt");
 await box(76, 1, 6, 56, 2, 8, "cast_concrete_b"); await box(76, 3, 6, 56, 1, 1, "warning");
-await cut(71, 1, 14, 1, 5, 4);
 await call("add_brush_wedge", { ...BOX(80, 1, 14, 10, 2, 5), high: "+y", texture: "cast_concrete_b" });
 await call("add_stairs", { ...BOX(110, 1, 40, 6, 3, 4), high: "+x", steps: 6, texture: "cast_concrete_b" });
 for (const [x, z, y] of [[88, 24, 1], [88, 24, 4]]) await box(x, y, z, 6, 3, 2.4, y === 1 ? "painted_steel" : "rust_plate");
@@ -78,6 +80,7 @@ await call("add_brush_cylinder", { center: [P(104, 1, 12)[0], P(104, 1, 12)[1]],
 await box(135, 9, 42, 1, 9, 12, "plate_steel"); await box(135, 8, 42, 1, 1, 12, "reactor");
 
 
+}
 // ---- Dressing for parity with the hand-built original: light panels, hazard edges, pipe/vent bands, machines.
 // Visual-only (layer name starts with "Visual"): the converter marks these render-only, so no physics cost.
 const dl = await call("add_layer", { name: "Visual dressing" });
@@ -101,6 +104,15 @@ await dbox(15, 1, 14, 5, 0.12, 5, "trim_hazard_edge");                          
 for (const z of [8.5, 23.5]) await dbox(12, 5, z, 22, 0.8, 0.8, "rusty_pipe");                // bay overhead pipe runs
 await dbox(23, 5, 8.5, 0.8, 0.8, 15, "rusty_pipe");
 await dbox(34, 4.5, 14, 1, 1, 4, "hazard_red");                                               // hazard header over the corridor mouth
+if (DOCKS) {
+// Seam lip: a low rubble/dirt strip where the dock slab meets the ground (visual-only), so the contact reads without relying on terrain paint.
+for (const [x0, x1, z0, z1] of [[76, 132, 14, 15.2], [75, 76.9, 6, 14], [131.1, 133, 6, 14]]) {
+  const m = 0.35 * (z1 - z0) * 0, e = 0.5;
+  const pts = [[x0, 1, z0], [x1, 1, z0], [x0, 1, z1], [x1, 1, z1], [x0 + e, 1.45, z0 + e * 0.4], [x1 - e, 1.45, z0 + e * 0.4], [x0 + e, 1.45, z1 - e * 0.4], [x1 - e, 1.45, z1 - e * 0.4]];
+  const r = await call("add_brush_hull", { points: pts.map(([a, b, c]) => P(a, b, c)), texture: "rock" });
+  dressed.push(r.brushIndex);
+}
+}
 await call("move_to_layer", { layer_entity: dl.entity, brush_indices: dressed });
 
 // Rubble mounds (collidable rock hulls, like the original's): a low pile of two stacked hulls each.
