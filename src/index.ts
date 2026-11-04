@@ -5,11 +5,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import type { Entity, MapFile, Vec3 } from "./map/model.js";
+import type { Brush, Entity, MapFile, Vec3 } from "./map/model.js";
 import { classname, getProp, parseOrigin, removeProp, setProp } from "./map/model.js";
 import { parseMap } from "./map/parser.js";
 import { serializeMap } from "./map/writer.js";
-import { entityBounds, mapBounds } from "./map/geometry.js";
+import { boundsOfPoints, brushBounds, brushVertices, entityBounds, mapBounds, planeFromPoints } from "./map/geometry.js";
+import { bevelSolid, boxSolid, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
 import { makeBoxBrush, shouldWriteValve, translateEntity, usesValveFormat } from "./map/builder.js";
 import { renderView, type ViewName } from "./render/svg.js";
 import { atomicWrite, ensureTbMcpDir, listBackups, restoreLatest, snapshot } from "./backup.js";
@@ -26,7 +27,7 @@ import { compileShogoMap } from "./shogo.js";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.5.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.6.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -515,6 +516,267 @@ tool(
     if (!resolved) throw new Error(`class "${cls}" not found in ${fgd_path}`);
     return resolved;
   }
+);
+
+// ---------- brush / CSG tools ----------
+
+const snapSchema = z.boolean().optional().describe("Round plane points to whole units (TrenchBroom prefers integer planes). Default false.");
+const entSchema = z.number().int().optional().describe("Owning entity index; default 0 (worldspawn)");
+
+function pushSolid(map: MapFile, mapPath: string, e: Entity, solid: Solid, texture: string, snap?: boolean): number {
+  if (!isValidSolid(solid)) throw new Error("resulting brush is degenerate (zero volume)");
+  e.brushes.push(brushFromSolid(solid, texture, shouldWriteValve(map, mapPath), snap));
+  return e.brushes.length - 1;
+}
+
+function brushAt(e: Entity, i: number) {
+  const b = e.brushes[i];
+  if (!b) throw new Error(`no brush at index ${i} (entity has ${e.brushes.length})`);
+  return b;
+}
+
+tool(
+  "add_brush_wedge",
+  "Add a ramp/wedge brush filling the box min..max whose top slopes up toward `high` (+x, -x, +y or -y); the tall side keeps full height." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema,
+    min: vec3Schema, max: vec3Schema,
+    high: z.enum(["+x", "-x", "+y", "-y"]).describe("Direction the ramp rises toward"),
+    texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, min, max, high, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const s = wedgeSolid(min as Vec3, max as Vec3, high, texture, shouldWriteValve(map, map_path));
+      return { entity: entity_index ?? 0, brushIndex: pushSolid(map, map_path, e, s, texture, snap) };
+    })
+);
+
+tool(
+  "add_brush_prism",
+  "Add a convex prism: a 2D polygon (xy points, hull taken) extruded between z_min and z_max. Use for arbitrary-angle walls, chamfered pillars, octagonal rooms." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema,
+    polygon: z.array(z.tuple([z.number(), z.number()])).min(3),
+    z_min: z.number(), z_max: z.number(),
+    texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, polygon, z_min, z_max, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      if (z_min >= z_max) throw new Error("z_min must be below z_max");
+      const e = entityAt(map, entity_index ?? 0);
+      const s = prismSolid(polygon as [number, number][], z_min, z_max, texture, shouldWriteValve(map, map_path));
+      return { entity: entity_index ?? 0, brushIndex: pushSolid(map, map_path, e, s, texture, snap) };
+    })
+);
+
+tool(
+  "add_brush_cylinder",
+  "Add an n-sided cylinder (regular prism) around center [x y], from z_min to z_max. radius is to the corners." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema,
+    center: z.tuple([z.number(), z.number()]), radius: z.number().positive(),
+    z_min: z.number(), z_max: z.number(),
+    sides: z.number().int().min(3).max(64).optional().describe("Default 8"),
+    texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, center, radius, z_min, z_max, sides, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const n = sides ?? 8;
+      const poly: [number, number][] = [];
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        poly.push([center[0] + Math.cos(a) * radius, center[1] + Math.sin(a) * radius]);
+      }
+      const e = entityAt(map, entity_index ?? 0);
+      const s = prismSolid(poly, z_min, z_max, texture, shouldWriteValve(map, map_path));
+      return { entity: entity_index ?? 0, brushIndex: pushSolid(map, map_path, e, s, texture, snap) };
+    })
+);
+
+tool(
+  "rotate_brush",
+  "Rotate brushes about an axis through a pivot. Valve-format texture alignment stays locked to the geometry. Rotating a whole entity: omit brush_index." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: z.number().int(),
+    brush_index: z.number().int().optional().describe("Omit to rotate every brush of the entity"),
+    axis: z.enum(["x", "y", "z"]), degrees: z.number(),
+    pivot: vec3Schema.optional().describe("Default: centre of the selection's bounds"),
+  },
+  ({ map_path, entity_index, brush_index, axis, degrees, pivot }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index);
+      const targets = brush_index === undefined ? e.brushes : [brushAt(e, brush_index)];
+      let p = pivot as Vec3 | undefined;
+      if (!p) {
+        const pts = targets.flatMap((b) => brushVertices(b));
+        const bb = boundsOfPoints(pts);
+        if (!bb) throw new Error("nothing to rotate");
+        p = [(bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2];
+      }
+      const m = rotationMatrix(axis, degrees);
+      for (const b of targets) rotateBrush(b, m, p);
+      return { rotated: targets.length, pivot: p };
+    })
+);
+
+tool(
+  "clip_brush",
+  "Cut a brush with a plane (point + outward normal of the side kept 'back' = opposite the normal). keep: 'back' trims it, 'front' keeps the other side, 'both' splits into two brushes. The cut face gets cut_texture." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: z.number().int(), brush_index: z.number().int(),
+    point: vec3Schema, normal: vec3Schema,
+    keep: z.enum(["back", "front", "both"]),
+    cut_texture: z.string(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_index, point, normal, keep, cut_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index);
+      const valve = shouldWriteValve(map, map_path);
+      const s = solidFromBrush(brushAt(e, brush_index));
+      const { back, front } = split(s, planeThrough(normal as Vec3, point as Vec3));
+      const keepers = [keep !== "front" ? back : null, keep !== "back" ? front : null].filter((x): x is Solid => !!x);
+      if (keepers.length === 0) throw new Error("clip plane removes the whole brush; use delete_brush instead");
+      e.brushes.splice(brush_index, 1, ...keepers.map((k) => brushFromSolid(k, cut_texture, valve, snap)));
+      return { brushes: keepers.length };
+    })
+);
+
+tool(
+  "subtract_box",
+  "Boolean subtract: carve the box min..max out of brushes (all brushes of the entity, or one). Each affected convex brush becomes up to 6 pieces, so doorways, windows and rooms can be cut from solid masses. New faces get cut_texture unless the cutter's texture is wanted." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: entSchema,
+    brush_index: z.number().int().optional().describe("Only carve this brush; default every brush in the entity"),
+    min: vec3Schema, max: vec3Schema, cut_texture: z.string(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_index, min, max, cut_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const valve = shouldWriteValve(map, map_path);
+      const cutter = boxSolid(min as Vec3, max as Vec3, cut_texture, valve);
+      const out: Brush[] = [];
+      let carved = 0;
+      e.brushes.forEach((b, i) => {
+        if ((brush_index !== undefined && i !== brush_index) || !intersects(solidFromBrush(b), cutter)) {
+          out.push(b);
+          return;
+        }
+        carved++;
+        for (const piece of subtract(solidFromBrush(b), cutter)) out.push(brushFromSolid(piece, cut_texture, valve, snap));
+      });
+      e.brushes = out;
+      return { carved, brushesNow: out.length };
+    })
+);
+
+tool(
+  "hollow_brush",
+  "Hollow an axis-aligned box brush into a room: replaces it with walls of the given thickness around an empty interior (up to 6 brushes)." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: z.number().int(), brush_index: z.number().int(),
+    wall: z.number().positive(), inner_texture: z.string().optional(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_index, wall, inner_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index);
+      const b = brushAt(e, brush_index);
+      const bb = brushBounds(b)!;
+      const inn = inset(bb.min, bb.max, wall);
+      for (let i = 0; i < 3; i++) if (inn.min[i] >= inn.max[i]) throw new Error("wall too thick for this brush");
+      const valve = shouldWriteValve(map, map_path);
+      const tex = inner_texture ?? b.faces[0].texture;
+      const pieces = subtract(solidFromBrush(b), boxSolid(inn.min, inn.max, tex, valve));
+      e.brushes.splice(brush_index, 1, ...pieces.map((p) => brushFromSolid(p, tex, valve, snap)));
+      return { walls: pieces.length };
+    })
+);
+
+tool(
+  "bevel_brush",
+  "Chamfer every edge of a brush by `size` units (cut faces get bevel_texture, default the brush's first face texture). For trims, lips and anything that must not read as a bare cube." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: z.number().int(), brush_index: z.number().int(),
+    size: z.number().positive(), bevel_texture: z.string().optional(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_index, size, bevel_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index);
+      const b = brushAt(e, brush_index);
+      const tex = bevel_texture ?? b.faces[0].texture;
+      const valve = shouldWriteValve(map, map_path);
+      const out = bevelSolid(solidFromBrush(b), size, tex, valve);
+      if (!isValidSolid(out)) throw new Error("bevel too large for this brush");
+      e.brushes[brush_index] = brushFromSolid(out, tex, valve, snap);
+      return { faces: e.brushes[brush_index].faces.length };
+    })
+);
+
+tool(
+  "list_brushes",
+  "List an entity's brushes with bounds, face count and textures, so brush_index values can be found without dumping the map.",
+  { map_path: mapPathSchema, entity_index: entSchema },
+  ({ map_path, entity_index }) => {
+    const map = loadMap(map_path);
+    const e = entityAt(map, entity_index ?? 0);
+    return e.brushes.map((b, i) => {
+      const bb = brushBounds(b);
+      return { index: i, faces: b.faces.length, min: bb?.min, max: bb?.max, textures: [...new Set(b.faces.map((f) => f.texture))] };
+    });
+  }
+);
+
+tool(
+  "set_face_texture",
+  "Set texture, scale, rotation or offset on faces of a brush. Select faces by index, by outward direction ('+z' top, '-z' bottom, '+x', ...) or all. In Valve format, offset is [u, v]; scale applies to both axes unless two numbers are given." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: z.number().int(), brush_index: z.number().int().optional().describe("Omit for every brush of the entity"),
+    faces: z.union([z.literal("all"), z.enum(["+x", "-x", "+y", "-y", "+z", "-z"]), z.array(z.number().int())]).optional().describe("Default all"),
+    texture: z.string().optional(),
+    scale: z.union([z.number(), z.tuple([z.number(), z.number()])]).optional(),
+    rotation: z.number().optional(),
+    offset: z.tuple([z.number(), z.number()]).optional(),
+  },
+  ({ map_path, entity_index, brush_index, faces, texture, scale, rotation, offset }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index);
+      const brushes = brush_index === undefined ? e.brushes : [brushAt(e, brush_index)];
+      let changed = 0;
+      for (const b of brushes) {
+        b.faces.forEach((f, i) => {
+          const n = planeFromPoints(...f.points).normal;
+          const sel = faces ?? "all";
+          let hit = false;
+          if (sel === "all") hit = true;
+          else if (Array.isArray(sel)) hit = sel.includes(i);
+          else {
+            const ax = sel[1] === "x" ? 0 : sel[1] === "y" ? 1 : 2;
+            const sgn = sel[0] === "+" ? 1 : -1;
+            hit = n[ax] * sgn > 0.7;
+          }
+          if (!hit) return;
+          if (texture !== undefined) f.texture = texture;
+          if (scale !== undefined) {
+            const [sx, sy] = typeof scale === "number" ? [scale, scale] : scale;
+            f.xScale = sx;
+            f.yScale = sy;
+          }
+          if (rotation !== undefined) f.rotation = rotation;
+          if (offset !== undefined) {
+            if (f.uAxis && f.vAxis) {
+              f.uAxis.offset = offset[0];
+              f.vAxis.offset = offset[1];
+            } else {
+              f.xOffset = offset[0];
+              f.yOffset = offset[1];
+            }
+          }
+          f.raw = undefined;
+          changed++;
+        });
+      }
+      return { facesChanged: changed };
+    })
 );
 
 // ---------- start ----------
