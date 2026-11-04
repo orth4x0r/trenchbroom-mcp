@@ -91,6 +91,16 @@ await dbox(12.1, 4.2, 10, 0.3, 1.2, 8, "vent_grille");                          
 await dbox(30, 1, 9, 3, 2.4, 2, "machine");                                                  // bay machine
 await dbox(15, 1, 22, 4, 2.2, 1, "archive_drawers");                                         // archive drawers
 await dbox(33, 3.4, 14, 0.12, 0.3, 4, "trim_door_frame");                                    // door-head trim
+// Parity pass 2: the original's three alcove portals (frame + machine) along the corridor, bay hazard pad, overhead pipe runs.
+for (const [x, z] of [[43, 19], [63, 19], [54, 12]]) {
+  await dbox(x, 1, z, 1, 5, 1, "trim_door_frame"); await dbox(x + 4, 1, z, 1, 5, 1, "trim_door_frame");
+  await dbox(x + 1, 5, z, 3, 1, 1, "trim_door_frame"); await dbox(x + 1, 1, z, 3, 0.4, 1, "trim_door_frame");
+  if (z === 19) await dbox(x + 1, 2, z + 0.4, 3, 3, 0.6, "machine");
+}
+await dbox(15, 1, 14, 5, 0.12, 5, "trim_hazard_edge");                                        // bay hazard pad
+for (const z of [8.5, 23.5]) await dbox(12, 5, z, 22, 0.8, 0.8, "rusty_pipe");                // bay overhead pipe runs
+await dbox(23, 5, 8.5, 0.8, 0.8, 15, "rusty_pipe");
+await dbox(34, 4.5, 14, 1, 1, 4, "hazard_red");                                               // hazard header over the corridor mouth
 await call("move_to_layer", { layer_entity: dl.entity, brush_indices: dressed });
 
 // Group the dock containers, bevel the quota board for a lip, array some ribs along the corridor wall.
