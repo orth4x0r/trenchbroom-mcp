@@ -49,7 +49,6 @@ await call("add_arch", { center: P(34.5, 1 + 2.5, 16), axis: "y", inner: 2 * U, 
 for (const z of [14.2, 17.8]) await call("add_pipe", { from: P(35, 5, z), to: P(71, 5, z), radius: 0.35 * U, sides: 8, texture: "pipe" });
 await box(46, 1, 13, 2, 2, 2, "orange_trim"); await box(58, 1, 17, 2, 2, 2, "orange_trim");
 await box(64, 1, 13, 4, 1, 2, "dark_steel");
-await call("set_face_texture", { entity_index: 0, faces: "+z", texture: "hazard_paint", scale: 1 });
 
 // C / Loading Docks entry: open yard walls, a long dock slab with warning trim, containers, ramp, stairs, catwalk, pillars
 await box(72, 0, 5, 64, 1, 52, "asphalt");
