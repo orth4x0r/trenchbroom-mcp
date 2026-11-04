@@ -311,3 +311,9 @@ npm test
   [TrenchBroom#5453](https://github.com/TrenchBroom/TrenchBroom/issues/5453),
   starting with a simplified reload dialog per maintainer feedback. (#3505 asked
   for external reload back in 2020.)
+
+## Fork notes (orth4x0r)
+
+This fork adds CSG brush tools (`src/map/csg.ts`: wedge, prism, cylinder, rotate, clip, subtract, hollow, bevel, face texture) for the KICKBACK Afterglow level pipeline.
+
+Licence status: upstream ships no LICENSE file. On 2026-11-04 the maintainer told the fork owner directly that using it is fine ("no license, copyleft"). That is a verbal statement, not a licence grant in the repo; if this fork is ever redistributed beyond personal and project use, ask upstream to add an explicit licence.
