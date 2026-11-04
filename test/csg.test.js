@@ -87,3 +87,14 @@ test("faceExtent reads the u/v span of a Valve face", () => {
   const e = faceExtent(top.plane.src, top.verts);
   near(e.u[1] - e.u[0], 64); near(e.v[1] - e.v[0], 32);
 });
+
+test("union/intersect maths: flush boxes merge to a hull, overlapping L does not", () => {
+  const a = boxSolid([0, 0, 0], [16, 16, 16], "t", true), b = boxSolid([16, 0, 0], [32, 16, 16], "t", true);
+  const hull = solidFromPoints([...[0, 16, 32].flatMap((x) => [0, 16].flatMap((y) => [0, 16].map((z) => [x, y, z])))], "t", true);
+  near(solidVolume(hull), solidVolume(a) + solidVolume(b));
+  const c = boxSolid([8, 8, 0], [24, 24, 16], "t", true);
+  const inter = { planes: [...a.planes, ...c.planes] };
+  near(solidVolume(inter), 8 * 8 * 16);
+  const rest = subtract(c, a);
+  near(rest.reduce((s, p) => s + solidVolume(p), 0), solidVolume(c) - 8 * 8 * 16, 0.1);
+});

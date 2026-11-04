@@ -10,7 +10,7 @@ import { classname, getProp, parseOrigin, removeProp, setProp } from "./map/mode
 import { parseMap } from "./map/parser.js";
 import { serializeMap } from "./map/writer.js";
 import { boundsOfPoints, brushBounds, brushVertices, entityBounds, mapBounds, planeFromPoints } from "./map/geometry.js";
-import { archPoints, faceExtent, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
+import { archPoints, faceExtent, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, solidVolume, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
 import { makeBoxBrush, shouldWriteValve, translateEntity, usesValveFormat } from "./map/builder.js";
 import { renderShaded } from "./render/shaded.js";
 import { renderView, type ViewName } from "./render/svg.js";
@@ -1103,6 +1103,81 @@ tool(
       layer.brushes.push(...picked);
       for (const ei of entity_indices ?? []) setProp(entityAt(map, ei), "_tb_layer", id);
       return { brushesMoved: picked.length, entitiesTagged: (entity_indices ?? []).length };
+    })
+);
+
+// ---------- brush-vs-brush booleans ----------
+
+function twoBrushes(map: MapFile, ei: number, a: number, b: number) {
+  const e = entityAt(map, ei);
+  if (a === b) throw new Error("brush_a and brush_b must differ");
+  return { e, ba: brushAt(e, a), bb: brushAt(e, b) };
+}
+
+tool(
+  "subtract_brush",
+  "Boolean A minus B between two existing brushes (A is carved by B's shape: slanted cutters, pipes, arches, anything convex). A becomes up to one piece per face of B. keep_cutter false (default) deletes B afterwards." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: entSchema, brush_a: z.number().int(), brush_b: z.number().int(),
+    keep_cutter: z.boolean().optional(), cut_texture: z.string().optional(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_a, brush_b, keep_cutter, cut_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const ei = entity_index ?? 0;
+      const { e, ba, bb } = twoBrushes(map, ei, brush_a, brush_b);
+      const valve = shouldWriteValve(map, map_path);
+      const sa = solidFromBrush(ba), sb = solidFromBrush(bb);
+      const tex = cut_texture ?? ba.faces[0].texture;
+      const pieces = intersects(sa, sb) ? subtract(sa, sb).map((p) => brushFromSolid(p, tex, valve, snap)) : [ba];
+      const drop = new Set([brush_a, ...(keep_cutter ? [] : [brush_b])]);
+      e.brushes = [...e.brushes.filter((_, i) => !drop.has(i)), ...pieces];
+      return { pieces: pieces.length, brushesNow: e.brushes.length };
+    })
+);
+
+tool(
+  "intersect_brushes",
+  "Boolean A and B: both brushes are replaced by the single convex brush where they overlap. Fails if they do not overlap." + EDITOR_NOTE,
+  { map_path: mapPathSchema, entity_index: entSchema, brush_a: z.number().int(), brush_b: z.number().int(), snap: snapSchema },
+  ({ map_path, entity_index, brush_a, brush_b, snap }) =>
+    withMap(map_path, (map) => {
+      const { e, ba, bb } = twoBrushes(map, entity_index ?? 0, brush_a, brush_b);
+      const both: Solid = { planes: [...solidFromBrush(ba).planes, ...solidFromBrush(bb).planes] };
+      if (!isValidSolid(both)) throw new Error("brushes do not overlap");
+      const made = brushFromSolid(both, ba.faces[0].texture, shouldWriteValve(map, map_path), snap);
+      e.brushes = [...e.brushes.filter((_, i) => i !== brush_a && i !== brush_b), made];
+      return { volume: solidVolume(both) };
+    })
+);
+
+tool(
+  "union_brushes",
+  "Boolean A or B. Brushes in this format are convex, so a union is either one merged convex brush (when the hull of both has exactly the union's volume, e.g. two boxes forming a bigger box or a flush slab) or a non-overlapping set: A stays, B is trimmed to B minus A. Returns which happened. merge: 'auto' (default) tries the hull first, 'never' always trims." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: entSchema, brush_a: z.number().int(), brush_b: z.number().int(),
+    merge: z.enum(["auto", "never"]).optional(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, brush_a, brush_b, merge, snap }) =>
+    withMap(map_path, (map) => {
+      const { e, ba, bb } = twoBrushes(map, entity_index ?? 0, brush_a, brush_b);
+      const valve = shouldWriteValve(map, map_path);
+      const sa = solidFromBrush(ba), sb = solidFromBrush(bb);
+      const tex = ba.faces[0].texture;
+      const inter: Solid = { planes: [...sa.planes, ...sb.planes] };
+      const overlap = isValidSolid(inter) ? solidVolume(inter) : 0;
+      const unionVol = solidVolume(sa) + solidVolume(sb) - overlap;
+      if ((merge ?? "auto") === "auto") {
+        const pts = [...brushVertices(ba), ...brushVertices(bb)];
+        const hull = solidFromPoints(pts, tex, valve);
+        if (isValidSolid(hull) && Math.abs(solidVolume(hull) - unionVol) < Math.max(0.05, unionVol * 1e-4)) {
+          e.brushes = [...e.brushes.filter((_, i) => i !== brush_a && i !== brush_b), brushFromSolid(hull, tex, valve, snap)];
+          return { result: "merged", brushes: 1, volume: unionVol };
+        }
+      }
+      const rest = overlap > 0 ? subtract(sb, sa) : [sb];
+      const made = rest.map((p) => brushFromSolid(p, bb.faces[0].texture, valve, snap));
+      e.brushes = [...e.brushes.filter((_, i) => i !== brush_b), ...made];
+      return { result: "set", trimmedBPieces: made.length, volume: unionVol };
     })
 );
 
