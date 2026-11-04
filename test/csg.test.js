@@ -73,3 +73,17 @@ test("clone with mirror keeps outward winding (positive volume, same size)", () 
   const r = transformBrush(b, 90, [10, 0, 0], [0, 0, 0]);
   near(solidVolume(solidFromBrush(r)), 16 * 8 * 4, 0.1);
 });
+
+import { bevelSolid as bevel2, faceExtent } from "../dist/map/csg.js";
+test("per-edge bevel: vertical only adds 4 faces, top only adds 4, all adds 12", () => {
+  const b = boxSolid([0, 0, 0], [32, 32, 32], "t", true);
+  assert.equal(polygons(bevel2(b, 4, "t", true, "vertical")).length, 6 + 4);
+  assert.equal(polygons(bevel2(b, 4, "t", true, "top")).length, 6 + 4);
+  assert.equal(polygons(bevel2(b, 4, "t", true, "all")).length, 6 + 12);
+});
+test("faceExtent reads the u/v span of a Valve face", () => {
+  const brush = brushFromSolid(boxSolid([0, 0, 0], [64, 32, 16], "t", true), "t", true);
+  const top = polygons(solidFromBrush(brush)).find((p) => p.plane.plane.normal[2] > 0.9);
+  const e = faceExtent(top.plane.src, top.verts);
+  near(e.u[1] - e.u[0], 64); near(e.v[1] - e.v[0], 32);
+});

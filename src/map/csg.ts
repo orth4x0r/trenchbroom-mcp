@@ -356,7 +356,9 @@ export function boxSolid(min: Vec3, max: Vec3, texture: string, valve: boolean):
  * Chamfer every edge by `size`. Each pair of adjacent faces gets one cutting
  * plane through the two points `size` away from the shared edge, one on each face.
  */
-export function bevelSolid(solid: Solid, size: number, texture: string, valve: boolean): Solid {
+export type BevelEdges = "all" | "vertical" | "horizontal" | "top" | "bottom";
+
+export function bevelSolid(solid: Solid, size: number, texture: string, valve: boolean, which: BevelEdges = "all"): Solid {
   const polys = polygons(solid);
   const cuts: SolidPlane[] = [];
   const key = (v: Vec3) => v.map((x) => Math.round(x * 100)).join(",");
@@ -373,6 +375,18 @@ export function bevelSolid(solid: Solid, size: number, texture: string, valve: b
   });
   for (const e of edges.values()) {
     if (e.polys.length !== 2) continue;
+    if (which !== "all") {
+      const d = normalize(sub(e.b, e.a));
+      const vertical = Math.abs(d[2]) > 0.9;
+      const zs = polys.flatMap((p) => p.verts.map((v) => v[2]));
+      const zTop = Math.max(...zs), zBot = Math.min(...zs);
+      const onTop = !vertical && Math.abs(e.a[2] - zTop) < 1e-3 && Math.abs(e.b[2] - zTop) < 1e-3;
+      const onBottom = !vertical && Math.abs(e.a[2] - zBot) < 1e-3 && Math.abs(e.b[2] - zBot) < 1e-3;
+      if (which === "vertical" && !vertical) continue;
+      if (which === "horizontal" && vertical) continue;
+      if (which === "top" && !onTop) continue;
+      if (which === "bottom" && !onBottom) continue;
+    }
     const n1 = polys[e.polys[0]].plane.plane.normal;
     const n2 = polys[e.polys[1]].plane.plane.normal;
     const s = Math.sqrt(Math.max(0, 1 - dot(n1, n2) ** 2));
@@ -521,4 +535,12 @@ export function transformBrush(brush: Brush, rotZ: number, offset: Vec3, pivot: 
     f.raw = undefined;
   }
   return copy;
+}
+
+/** Face extent along the Valve u and v axes, for fit-to-face scaling. */
+export function faceExtent(face: Face, verts: Vec3[]): { u: [number, number]; v: [number, number] } | null {
+  if (!face.uAxis || !face.vAxis) return null;
+  const us = verts.map((p) => dot(face.uAxis!.axis, p));
+  const vs = verts.map((p) => dot(face.vAxis!.axis, p));
+  return { u: [Math.min(...us), Math.max(...us)], v: [Math.min(...vs), Math.max(...vs)] };
 }

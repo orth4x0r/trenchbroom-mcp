@@ -10,7 +10,7 @@ import { classname, getProp, parseOrigin, removeProp, setProp } from "./map/mode
 import { parseMap } from "./map/parser.js";
 import { serializeMap } from "./map/writer.js";
 import { boundsOfPoints, brushBounds, brushVertices, entityBounds, mapBounds, planeFromPoints } from "./map/geometry.js";
-import { archPoints, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
+import { archPoints, faceExtent, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
 import { makeBoxBrush, shouldWriteValve, translateEntity, usesValveFormat } from "./map/builder.js";
 import { renderShaded } from "./render/shaded.js";
 import { renderView, type ViewName } from "./render/svg.js";
@@ -699,14 +699,15 @@ tool(
   {
     map_path: mapPathSchema, entity_index: z.number().int(), brush_index: z.number().int(),
     size: z.number().positive(), bevel_texture: z.string().optional(), snap: snapSchema,
+    edges: z.enum(["all", "vertical", "horizontal", "top", "bottom"]).optional().describe("Which edges to chamfer; default all"),
   },
-  ({ map_path, entity_index, brush_index, size, bevel_texture, snap }) =>
+  ({ map_path, entity_index, brush_index, size, bevel_texture, snap, edges }) =>
     withMap(map_path, (map) => {
       const e = entityAt(map, entity_index);
       const b = brushAt(e, brush_index);
       const tex = bevel_texture ?? b.faces[0].texture;
       const valve = shouldWriteValve(map, map_path);
-      const out = bevelSolid(solidFromBrush(b), size, tex, valve);
+      const out = bevelSolid(solidFromBrush(b), size, tex, valve, edges ?? "all");
       if (!isValidSolid(out)) throw new Error("bevel too large for this brush");
       e.brushes[brush_index] = brushFromSolid(out, tex, valve, snap);
       return { faces: e.brushes[brush_index].faces.length };
@@ -737,8 +738,10 @@ tool(
     scale: z.union([z.number(), z.tuple([z.number(), z.number()])]).optional(),
     rotation: z.number().optional(),
     offset: z.tuple([z.number(), z.number()]).optional(),
+    fit_tiles: z.tuple([z.number().positive(), z.number().positive()]).optional().describe("Valve only: scale and offset so the texture repeats exactly this many times across the face in u and v (e.g. [1,1] stretches one copy over the face)"),
+    texture_size: z.tuple([z.number().positive(), z.number().positive()]).optional().describe("Texture size in px for fit_tiles; default [128,128]"),
   },
-  ({ map_path, entity_index, brush_index, faces, texture, scale, rotation, offset }) =>
+  ({ map_path, entity_index, brush_index, faces, texture, scale, rotation, offset, fit_tiles, texture_size }) =>
     withMap(map_path, (map) => {
       const e = entityAt(map, entity_index);
       const brushes = brush_index === undefined ? e.brushes : [brushAt(e, brush_index)];
@@ -770,6 +773,17 @@ tool(
             } else {
               f.xOffset = offset[0];
               f.yOffset = offset[1];
+            }
+          }
+          if (fit_tiles && f.uAxis && f.vAxis) {
+            const verts = polygons(solidFromBrush(b)).find((pg) => pg.plane.src === f)?.verts;
+            const ext = verts ? faceExtent(f, verts) : null;
+            if (ext) {
+              const [tw, th] = texture_size ?? [128, 128];
+              f.xScale = Math.max(1e-3, (ext.u[1] - ext.u[0]) / (tw * fit_tiles[0]));
+              f.yScale = Math.max(1e-3, (ext.v[1] - ext.v[0]) / (th * fit_tiles[1]));
+              f.uAxis.offset = -ext.u[0] / f.xScale;
+              f.vAxis.offset = -ext.v[0] / f.yScale;
             }
           }
           f.raw = undefined;
@@ -1048,6 +1062,48 @@ tool(
     fs.writeFileSync(dest, r.png);
     return { pngPath: dest, polygons: r.polys };
   }
+);
+
+tool(
+  "add_layer",
+  "Create a TrenchBroom layer (a named, hideable layer such as 'Architecture', 'Trim', 'Gameplay volumes'). Returns its entity index and id." + EDITOR_NOTE,
+  { map_path: mapPathSchema, name: z.string(), omit_from_export: z.boolean().optional() },
+  ({ map_path, name, omit_from_export }) =>
+    withMap(map_path, (map) => {
+      const ids = map.entities.map((e) => Number(getProp(e, "_tb_id") ?? 0));
+      const id = Math.max(0, ...ids) + 1;
+      const sort = map.entities.filter((e) => getProp(e, "_tb_type") === "_tb_layer").length + 1;
+      const props = [
+        { key: "classname", value: "func_group" }, { key: "_tb_type", value: "_tb_layer" },
+        { key: "_tb_name", value: name }, { key: "_tb_id", value: String(id) },
+        { key: "_tb_layer_sort_index", value: String(sort) },
+      ];
+      if (omit_from_export) props.push({ key: "_tb_layer_omit_from_export", value: "1" });
+      map.entities.push({ properties: props, brushes: [] });
+      return { entity: map.entities.length - 1, layerId: id };
+    })
+);
+
+tool(
+  "move_to_layer",
+  "Move brushes (from worldspawn) and/or whole entities (point or group entities) into a layer made with add_layer." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, layer_entity: z.number().int().describe("Entity index returned by add_layer"),
+    brush_indices: z.array(z.number().int()).optional().describe("Brushes of worldspawn"),
+    entity_indices: z.array(z.number().int()).optional().describe("Other entities to tag with the layer"),
+  },
+  ({ map_path, layer_entity, brush_indices, entity_indices }) =>
+    withMap(map_path, (map) => {
+      const layer = entityAt(map, layer_entity);
+      if (getProp(layer, "_tb_type") !== "_tb_layer") throw new Error("not a layer entity");
+      const id = getProp(layer, "_tb_id")!;
+      const w = entityAt(map, 0);
+      const picked = [...new Set(brush_indices ?? [])].sort((a, b) => a - b).map((i) => brushAt(w, i));
+      w.brushes = w.brushes.filter((b) => !picked.includes(b));
+      layer.brushes.push(...picked);
+      for (const ei of entity_indices ?? []) setProp(entityAt(map, ei), "_tb_layer", id);
+      return { brushesMoved: picked.length, entitiesTagged: (entity_indices ?? []).length };
+    })
 );
 
 // ---------- start ----------
