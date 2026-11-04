@@ -12,6 +12,7 @@ import { serializeMap } from "./map/writer.js";
 import { boundsOfPoints, brushBounds, brushVertices, entityBounds, mapBounds, planeFromPoints } from "./map/geometry.js";
 import { archPoints, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
 import { makeBoxBrush, shouldWriteValve, translateEntity, usesValveFormat } from "./map/builder.js";
+import { renderShaded } from "./render/shaded.js";
 import { renderView, type ViewName } from "./render/svg.js";
 import { atomicWrite, ensureTbMcpDir, listBackups, restoreLatest, snapshot } from "./backup.js";
 import { parseFgd, resolveClass } from "./fgd/parser.js";
@@ -1027,6 +1028,25 @@ tool(
       });
     });
     return { brushes: map.entities.reduce((n, e) => n + e.brushes.length, 0), issues: issues.slice(0, 200), issueCount: issues.length };
+  }
+);
+
+tool(
+  "render_shaded",
+  "Fast shaded 3D preview as a PNG (software rasterizer, flat-shaded, z-buffered, ~1 s for thousands of brushes). Give an eye and a target point in map units; textures get stable colours (or pass colors). clip_z hides everything above a height for cutaways. Use this to judge silhouettes and layout before importing into the game.",
+  {
+    map_path: mapPathSchema, eye: vec3Schema, target: vec3Schema,
+    fov: z.number().min(20).max(120).optional(), width: z.number().int().min(160).max(1920).optional(), height: z.number().int().min(90).max(1080).optional(),
+    clip_z: z.number().optional(), colors: z.record(z.tuple([z.number(), z.number(), z.number()])).optional(),
+    out_path: z.string().optional().describe("PNG path; default <mapdir>/.tb-mcp/shaded.png"),
+  },
+  ({ map_path, eye, target, fov, width, height, clip_z, colors, out_path }) => {
+    const map = loadMap(map_path);
+    const r = renderShaded(map, { eye: eye as Vec3, target: target as Vec3, fov, width, height, clipZ: clip_z, colors: colors as any });
+    const dest = out_path ?? path.join(ensureTbMcpDir(map_path), "shaded.png");
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, r.png);
+    return { pngPath: dest, polygons: r.polys };
   }
 );
 

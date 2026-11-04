@@ -317,3 +317,25 @@ npm test
 This fork adds CSG brush tools (`src/map/csg.ts`: wedge, prism, cylinder, rotate, clip, subtract, hollow, bevel, face texture) for the KICKBACK Afterglow level pipeline.
 
 Licence status: upstream ships no LICENSE file. On 2026-11-04 the maintainer told the fork owner directly that using it is fine ("no license, copyleft"). That is a verbal statement, not a licence grant in the repo; if this fork is ever redistributed beyond personal and project use, ask upstream to add an explicit licence.
+
+## Feature checklist (KICKBACK Afterglow needs)
+
+Derived from what the five campaign levels contain (hulls, floors, chamfers, boxes, terrain, point/volume entities).
+
+| Need | Tool | Status |
+|---|---|---|
+| Boxes, ramps/wedges | add_brush_box, add_brush_wedge | done |
+| Stairs, arches, catwalks (deck, rails, legs) | add_stairs, add_arch, add_catwalk | done |
+| Pipes/beams at any angle, columns, n-gons | add_pipe, add_brush_cylinder, add_brush_prism | done |
+| Any convex shape (chamfered pillars, tapered legs) | add_brush_hull | done |
+| Chamfer/bevel all edges | bevel_brush | done (per-edge selection: todo) |
+| Rooms, doors, windows, trenches (CSG) | hollow_brush, subtract_box, subtract_path | done |
+| Clip/split, rotate, mirror, arrays | clip_brush, rotate_brush, clone_brushes | done |
+| Groups | group_brushes | done (layers: todo) |
+| Entities + key/values (spawn, light, prop, door...) | add_entity, set_entity_properties, FGD tools | done (game FGD: todo) |
+| Texture, scale, rotation, offset | set_face_texture | done (fit-to-face: todo) |
+| Grid/snap | `snap` flag on every shape tool | done |
+| Validation | validate_map (degenerate, thin, bounds, unknown material, duplicates); compile_map for leaks | done |
+| Fast previews | render_preview (2D SVG), render_shaded (3D PNG) | done |
+| Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |
+| Terrain seam (sink below heightfield) | | todo (lives in the importer) |
