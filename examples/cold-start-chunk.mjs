@@ -61,7 +61,7 @@ if (TRIM !== "none") await call("add_room_trim", { layer: TRIM, ...corIn, base_h
 await cut(34, 1, 14, 1, 4, 4);                                         // doorway from the bay
 await call("add_arch", { center: P(34.5, 1 + 2.5, 16), axis: "y", inner: 2 * U, outer: 2.6 * U, depth: 1 * U, segments: 8, texture: "orange_trim" });
 for (const z of [14.2, 17.8]) await call("add_pipe", { from: P(35, 5, z), to: P(71, 5, z), radius: 0.35 * U, sides: 8, texture: "rusty_pipe" });
-await box(46, 1, 13, 2, 2, 2, "orange_trim"); await box(58, 1, 17, 2, 2, 2, "orange_trim");
+await box(46, 1, 13, 2, 2, 2, "rust_plate"); await box(58, 1, 17, 2, 2, 2, "rust_plate");
 await box(64, 1, 13, 4, 1, 2, "plate_steel");
 
 // C / Loading Docks entry: open yard walls, a long dock slab with warning trim, containers, ramp, stairs, catwalk, pillars
@@ -102,6 +102,12 @@ for (const z of [8.5, 23.5]) await dbox(12, 5, z, 22, 0.8, 0.8, "rusty_pipe");  
 await dbox(23, 5, 8.5, 0.8, 0.8, 15, "rusty_pipe");
 await dbox(34, 4.5, 14, 1, 1, 4, "hazard_red");                                               // hazard header over the corridor mouth
 await call("move_to_layer", { layer_entity: dl.entity, brush_indices: dressed });
+
+// Rubble mounds (collidable rock hulls, like the original's): a low pile of two stacked hulls each.
+for (const [x, z, w, d, h] of [[48.7, 13.7, 4.6, 4.8, 1.2], [56.5, 15.2, 3.4, 3.2, 0.9], [26.5, 10, 3, 3, 0.8]]) {
+  const pts = [[x, 1, z], [x + w, 1, z], [x, 1, z + d], [x + w, 1, z + d], [x + w * 0.3, 1 + h, z + d * 0.3], [x + w * 0.7, 1 + h, z + d * 0.3], [x + w * 0.3, 1 + h, z + d * 0.7], [x + w * 0.7, 1 + h * 0.8, z + d * 0.7]];
+  await call("add_brush_hull", { points: pts.map(([a, b, c]) => P(a, b, c)), texture: "rock" });
+}
 
 // Group the dock containers, bevel the quota board for a lip, array some ribs along the corridor wall.
 const ov = await call("map_overview", {});
