@@ -397,3 +397,128 @@ export function inset(min: Vec3, max: Vec3, wall: number): { min: Vec3; max: Vec
     max: [max[0] - wall, max[1] - wall, max[2] - wall],
   };
 }
+
+// ---------- hulls and compound shapes ----------
+
+/** Convex hull of a point cloud as a solid (brute-force face planes; fine for <= ~64 points). */
+export function solidFromPoints(points: Vec3[], texture: string, valve: boolean): Solid {
+  const planes: Plane[] = [];
+  for (let i = 0; i < points.length; i++)
+    for (let j = i + 1; j < points.length; j++)
+      for (let k = j + 1; k < points.length; k++) {
+        const nrm = normalize(cross(sub(points[j], points[i]), sub(points[k], points[i])));
+        if (nrm[0] === 0 && nrm[1] === 0 && nrm[2] === 0) continue;
+        const d = dot(nrm, points[i]);
+        let pos = 0;
+        let neg = 0;
+        for (const p of points) {
+          const e = dot(nrm, p) - d;
+          if (e > 1e-4) pos++;
+          else if (e < -1e-4) neg++;
+          if (pos && neg) break;
+        }
+        if (pos && neg) continue;
+        const pl: Plane = pos ? { normal: [-nrm[0], -nrm[1], -nrm[2]], dist: -d } : { normal: nrm, dist: d };
+        if (!planes.some((q) => dot(q.normal, pl.normal) > 0.99999 && Math.abs(q.dist - pl.dist) < 1e-4)) planes.push(pl);
+      }
+  return { planes: planes.map((pl) => ({ plane: pl, src: faceAt(pl.normal, [0, 0, 0], texture, valve) })) };
+}
+
+/** Circular-ish pipe between two points: hull of two n-gon rings perpendicular to the axis. */
+export function pipePoints(a: Vec3, b: Vec3, radius: number, sides: number): Vec3[] {
+  const axis = normalize(sub(b, a));
+  const helper: Vec3 = Math.abs(axis[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const u = normalize(cross(axis, helper));
+  const v = cross(axis, u);
+  const pts: Vec3[] = [];
+  for (const c of [a, b]) {
+    for (let i = 0; i < sides; i++) {
+      const t = ((i + 0.5) / sides) * Math.PI * 2;
+      pts.push([
+        c[0] + (u[0] * Math.cos(t) + v[0] * Math.sin(t)) * radius,
+        c[1] + (u[1] * Math.cos(t) + v[1] * Math.sin(t)) * radius,
+        c[2] + (u[2] * Math.cos(t) + v[2] * Math.sin(t)) * radius,
+      ]);
+    }
+  }
+  return pts;
+}
+
+/**
+ * Stairs rising toward `dir` across the box footprint: `steps` full-width risers.
+ * Each step is a box from the floor to its own tread height, so every tread is solid.
+ */
+export function stairBoxes(min: Vec3, max: Vec3, dir: SlopeDir, steps: number): { min: Vec3; max: Vec3 }[] {
+  const out: { min: Vec3; max: Vec3 }[] = [];
+  const alongX = dir[1] === "x";
+  const sign = dir[0] === "+" ? 1 : -1;
+  const run = alongX ? max[0] - min[0] : max[1] - min[1];
+  const rise = max[2] - min[2];
+  for (let i = 0; i < steps; i++) {
+    const t0 = (i / steps) * run;
+    const t1 = ((i + 1) / steps) * run;
+    const top = min[2] + ((i + 1) / steps) * rise;
+    const lo: Vec3 = [...min] as Vec3;
+    const hi: Vec3 = [...max] as Vec3;
+    hi[2] = top;
+    if (alongX) {
+      if (sign > 0) { lo[0] = min[0] + t0; hi[0] = min[0] + t1; }
+      else { lo[0] = max[0] - t1; hi[0] = max[0] - t0; }
+    } else if (sign > 0) { lo[1] = min[1] + t0; hi[1] = min[1] + t1; }
+    else { lo[1] = max[1] - t1; hi[1] = max[1] - t0; }
+    // solid under each tread: extend this step back to the start so no tread floats
+    if (alongX) { if (sign > 0) lo[0] = min[0]; else hi[0] = max[0]; }
+    else if (sign > 0) lo[1] = min[1];
+    else hi[1] = max[1];
+    out.push({ min: lo, max: hi });
+  }
+  return out;
+}
+
+/**
+ * Arch opening: voussoir blocks around a half ring, as hulls. Spans the x axis (or y) at `base`,
+ * `inner` radius is the opening, `outer` the arch thickness, depth is the wall thickness.
+ */
+export function archPoints(center: Vec3, axis: "x" | "y", inner: number, outer: number, depth: number, segments: number): Vec3[][] {
+  const out: Vec3[][] = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = Math.PI * (i / segments);
+    const a1 = Math.PI * ((i + 1) / segments);
+    const pts: Vec3[] = [];
+    for (const a of [a0, a1]) {
+      for (const r of [inner, outer]) {
+        for (const d of [-depth / 2, depth / 2]) {
+          const across = Math.cos(a) * r;
+          const up = Math.sin(a) * r;
+          pts.push(axis === "x"
+            ? [center[0] + across, center[1] + d, center[2] + up]
+            : [center[0] + d, center[1] + across, center[2] + up]);
+        }
+      }
+    }
+    out.push(pts);
+  }
+  return out;
+}
+
+/** Affine copy of a brush: rotate about z through `pivot`, then translate. Valve texture lock is kept. */
+export function transformBrush(brush: Brush, rotZ: number, offset: Vec3, pivot: Vec3, mirror?: "x" | "y"): Brush {
+  const copy: Brush = JSON.parse(JSON.stringify(brush));
+  if (mirror) {
+    const k = mirror === "x" ? 0 : 1;
+    for (const f of copy.faces) {
+      f.points = f.points.map((p) => { const q: Vec3 = [...p] as Vec3; q[k] = 2 * pivot[k] - q[k]; return q; }) as [Vec3, Vec3, Vec3];
+      // reflection flips winding; swap two points to keep the outward normal
+      f.points = [f.points[0], f.points[2], f.points[1]];
+      for (const ax of [f.uAxis, f.vAxis]) if (ax) { ax.axis[k] = -ax.axis[k]; ax.offset += 0; }
+      f.raw = undefined;
+    }
+  }
+  if (rotZ) rotateBrush(copy, rotationMatrix("z", rotZ), pivot);
+  for (const f of copy.faces) {
+    f.points = f.points.map((p) => add(p, offset)) as [Vec3, Vec3, Vec3];
+    for (const ax of [f.uAxis, f.vAxis]) if (ax) ax.offset -= dot(ax.axis, offset) / 1;
+    f.raw = undefined;
+  }
+  return copy;
+}

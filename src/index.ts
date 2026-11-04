@@ -10,7 +10,7 @@ import { classname, getProp, parseOrigin, removeProp, setProp } from "./map/mode
 import { parseMap } from "./map/parser.js";
 import { serializeMap } from "./map/writer.js";
 import { boundsOfPoints, brushBounds, brushVertices, entityBounds, mapBounds, planeFromPoints } from "./map/geometry.js";
-import { bevelSolid, boxSolid, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
+import { archPoints, bevelSolid, boxSolid, pipePoints, polygons, solidFromPoints, stairBoxes, transformBrush, brushFromSolid, inset, intersects, isValidSolid, planeThrough, prismSolid, rotateBrush, rotationMatrix, solidFromBrush, split, subtract, wedgeSolid, type Solid } from "./map/csg.js";
 import { makeBoxBrush, shouldWriteValve, translateEntity, usesValveFormat } from "./map/builder.js";
 import { renderView, type ViewName } from "./render/svg.js";
 import { atomicWrite, ensureTbMcpDir, listBackups, restoreLatest, snapshot } from "./backup.js";
@@ -777,6 +777,257 @@ tool(
       }
       return { facesChanged: changed };
     })
+);
+
+// ---------- compound shapes, arrays, groups, validation ----------
+
+function pushBrushes(map: MapFile, mapPath: string, e: Entity, solids: Solid[], texture: string, snap?: boolean): number[] {
+  const idx: number[] = [];
+  for (const s of solids) {
+    if (!isValidSolid(s)) continue;
+    e.brushes.push(brushFromSolid(s, texture, shouldWriteValve(map, mapPath), snap));
+    idx.push(e.brushes.length - 1);
+  }
+  if (idx.length === 0) throw new Error("shape produced no valid brushes");
+  return idx;
+}
+
+tool(
+  "add_brush_hull",
+  "Add one brush that is the convex hull of the given points (>= 4, not coplanar). The general primitive: chamfered pillars, tapered legs, bevelled beams, anything convex." + EDITOR_NOTE,
+  { map_path: mapPathSchema, points: z.array(vec3Schema).min(4), texture: z.string(), entity_index: entSchema, snap: snapSchema },
+  ({ map_path, points, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const s = solidFromPoints(points as Vec3[], texture, shouldWriteValve(map, map_path));
+      return { brushIndex: pushBrushes(map, map_path, e, [s], texture, snap)[0] };
+    })
+);
+
+tool(
+  "add_stairs",
+  "Add a staircase filling the box min..max, rising toward `high`. Each step is a solid block down to the floor, so no tread floats (stair-reach audits stay happy). Step height = box height / steps." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, min: vec3Schema, max: vec3Schema,
+    high: z.enum(["+x", "-x", "+y", "-y"]), steps: z.number().int().min(2).max(64),
+    texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, min, max, high, steps, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const valve = shouldWriteValve(map, map_path);
+      const solids = stairBoxes(min as Vec3, max as Vec3, high, steps).map((b) => boxSolid(b.min, b.max, texture, valve));
+      return { brushes: pushBrushes(map, map_path, e, solids, texture, snap) };
+    })
+);
+
+tool(
+  "add_arch",
+  "Add a semicircular arch (voussoir blocks) standing on `center` (the springing line midpoint). Spans along `axis`; inner = opening radius, outer = outer radius, depth = wall thickness. Pair with subtract_box to cut the doorway first." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, center: vec3Schema, axis: z.enum(["x", "y"]),
+    inner: z.number().positive(), outer: z.number().positive(), depth: z.number().positive(),
+    segments: z.number().int().min(3).max(32).optional().describe("Default 8"),
+    texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, center, axis, inner, outer, depth, segments, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      if (outer <= inner) throw new Error("outer must exceed inner");
+      const e = entityAt(map, entity_index ?? 0);
+      const valve = shouldWriteValve(map, map_path);
+      const solids = archPoints(center as Vec3, axis, inner, outer, depth, segments ?? 8).map((pts) => solidFromPoints(pts, texture, valve));
+      return { brushes: pushBrushes(map, map_path, e, solids, texture, snap) };
+    })
+);
+
+tool(
+  "add_pipe",
+  "Add a straight pipe/beam between two points as an n-gon prism at any angle (default 8 sides). Chain several for bends; use big radius + few sides for ducts." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, from: vec3Schema, to: vec3Schema, radius: z.number().positive(),
+    sides: z.number().int().min(3).max(32).optional(), texture: z.string(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, from, to, radius, sides, texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const s = solidFromPoints(pipePoints(from as Vec3, to as Vec3, radius, sides ?? 8), texture, shouldWriteValve(map, map_path));
+      return { brushIndex: pushBrushes(map, map_path, e, [s], texture, snap)[0] };
+    })
+);
+
+tool(
+  "add_catwalk",
+  "Add a catwalk: a deck slab from `from` to `to` (a straight run, `width` wide, `thickness` thick, top at the given z), with optional side rails (post + top rail) and support legs every `leg_every` units down to `floor_z`." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, from: vec3Schema, to: vec3Schema, width: z.number().positive(), thickness: z.number().positive(),
+    rail_height: z.number().optional(), rail_size: z.number().positive().optional(),
+    leg_every: z.number().positive().optional(), leg_size: z.number().positive().optional(), floor_z: z.number().optional(),
+    deck_texture: z.string(), rail_texture: z.string().optional(), entity_index: entSchema, snap: snapSchema,
+  },
+  ({ map_path, from, to, width, thickness, rail_height, rail_size, leg_every, leg_size, floor_z, deck_texture, rail_texture, entity_index, snap }) =>
+    withMap(map_path, (map) => {
+      const f = from as Vec3, t = to as Vec3;
+      const alongX = Math.abs(t[0] - f[0]) >= Math.abs(t[1] - f[1]);
+      const top = Math.max(f[2], t[2]);
+      const valve = shouldWriteValve(map, map_path);
+      const rt = rail_texture ?? deck_texture;
+      const x0 = Math.min(f[0], t[0]), x1 = Math.max(f[0], t[0]), y0 = Math.min(f[1], t[1]), y1 = Math.max(f[1], t[1]);
+      const lo: Vec3 = alongX ? [x0, f[1] - width / 2, top - thickness] : [f[0] - width / 2, y0, top - thickness];
+      const hi: Vec3 = alongX ? [x1, f[1] + width / 2, top] : [f[0] + width / 2, y1, top];
+      const e = entityAt(map, entity_index ?? 0);
+      const made: number[] = [];
+      made.push(...pushBrushes(map, map_path, e, [boxSolid(lo, hi, deck_texture, valve)], deck_texture, snap));
+      if (rail_height) {
+        const rs = rail_size ?? 2;
+        const sides: [Vec3, Vec3][] = alongX
+          ? [[[lo[0], lo[1], top], [hi[0], lo[1] + rs, top + rail_height]], [[lo[0], hi[1] - rs, top], [hi[0], hi[1], top + rail_height]]]
+          : [[[lo[0], lo[1], top], [lo[0] + rs, hi[1], top + rail_height]], [[hi[0] - rs, lo[1], top], [hi[0], hi[1], top + rail_height]]];
+        made.push(...pushBrushes(map, map_path, e, sides.map(([a, b]) => boxSolid(a, b, rt, valve)), rt, snap));
+      }
+      if (leg_every && floor_z !== undefined) {
+        const ls = leg_size ?? 4;
+        const solids: Solid[] = [];
+        const len = alongX ? x1 - x0 : y1 - y0;
+        for (let d = 0; d <= len + 1e-6; d += leg_every) {
+          const c = (alongX ? x0 : y0) + Math.min(d, len - ls);
+          for (const side of [-1, 1]) {
+            const cross = (alongX ? f[1] : f[0]) + side * (width / 2 - ls);
+            const a: Vec3 = alongX ? [c, Math.min(cross, cross + ls), floor_z] : [Math.min(cross, cross + ls), c, floor_z];
+            const b: Vec3 = alongX ? [c + ls, a[1] + ls, top - thickness] : [a[0] + ls, c + ls, top - thickness];
+            solids.push(boxSolid(a, b, rt, valve));
+          }
+        }
+        made.push(...pushBrushes(map, map_path, e, solids, rt, snap));
+      }
+      return { brushes: made };
+    })
+);
+
+tool(
+  "subtract_path",
+  "Carve a trench/channel/corridor: subtract a swept rectangular profile along a polyline of [x y] points between z_min and z_max, `width` wide. Each segment is one cutter box (axis-aligned segments) or a rotated prism." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: entSchema, path: z.array(z.tuple([z.number(), z.number()])).min(2),
+    width: z.number().positive(), z_min: z.number(), z_max: z.number(), cut_texture: z.string(), snap: snapSchema,
+  },
+  ({ map_path, entity_index, path: pts, width, z_min, z_max, cut_texture, snap }) =>
+    withMap(map_path, (map) => {
+      const e = entityAt(map, entity_index ?? 0);
+      const valve = shouldWriteValve(map, map_path);
+      let brushes = e.brushes;
+      let carved = 0;
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+        const len = Math.hypot(bx - ax, by - ay);
+        const nx = (-(by - ay) / len) * (width / 2), ny = ((bx - ax) / len) * (width / 2);
+        const cutter = prismSolid([[ax + nx, ay + ny], [bx + nx, by + ny], [bx - nx, by - ny], [ax - nx, ay - ny]], z_min, z_max, cut_texture, valve);
+        const next: Brush[] = [];
+        for (const b of brushes) {
+          const s = solidFromBrush(b);
+          if (!intersects(s, cutter)) { next.push(b); continue; }
+          carved++;
+          for (const p of subtract(s, cutter)) next.push(brushFromSolid(p, cut_texture, valve, snap));
+        }
+        brushes = next;
+      }
+      e.brushes = brushes;
+      return { carved, brushesNow: brushes.length };
+    })
+);
+
+tool(
+  "clone_brushes",
+  "Copy brushes (listed, or the whole entity) `count` times, each copy moved by `offset` and rotated `rotate_z` degrees more than the last (about `pivot`), optionally mirrored first. Arrays of ribs, columns, rungs, rings; mirror a half-room." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, entity_index: entSchema, brush_indices: z.array(z.number().int()).optional(),
+    count: z.number().int().min(1).max(256), offset: vec3Schema.optional(), rotate_z: z.number().optional(),
+    pivot: vec3Schema.optional(), mirror: z.enum(["x", "y"]).optional().describe("Mirror about the pivot plane (copy only)"),
+    to_entity_index: z.number().int().optional().describe("Put copies in another entity (e.g. a func_group)"),
+  },
+  ({ map_path, entity_index, brush_indices, count, offset, rotate_z, pivot, mirror, to_entity_index }) =>
+    withMap(map_path, (map) => {
+      const src = entityAt(map, entity_index ?? 0);
+      const dst = entityAt(map, to_entity_index ?? (entity_index ?? 0));
+      const picks = (brush_indices ?? src.brushes.map((_, i) => i)).map((i) => brushAt(src, i));
+      const pv = (pivot as Vec3) ?? [0, 0, 0];
+      const off = (offset as Vec3) ?? [0, 0, 0];
+      let made = 0;
+      for (let n = 1; n <= count; n++) {
+        for (const b of picks) {
+          dst.brushes.push(transformBrush(b, (rotate_z ?? 0) * n, [off[0] * n, off[1] * n, off[2] * n], pv, n === 1 ? mirror : undefined));
+          made++;
+        }
+      }
+      return { made };
+    })
+);
+
+tool(
+  "group_brushes",
+  "Move brushes of worldspawn into a new named TrenchBroom group (func_group), so they select, hide and move together. Returns the group's entity index." + EDITOR_NOTE,
+  { map_path: mapPathSchema, brush_indices: z.array(z.number().int()).min(1), name: z.string() },
+  ({ map_path, brush_indices, name }) =>
+    withMap(map_path, (map) => {
+      const w = entityAt(map, 0);
+      const picked = [...new Set(brush_indices)].sort((a, b) => a - b).map((i) => brushAt(w, i));
+      w.brushes = w.brushes.filter((b) => !picked.includes(b));
+      const ids = map.entities.map((e) => Number(getProp(e, "_tb_id") ?? 0));
+      const id = Math.max(0, ...ids) + 1;
+      map.entities.push({
+        properties: [
+          { key: "classname", value: "func_group" }, { key: "_tb_type", value: "_tb_group" },
+          { key: "_tb_name", value: name }, { key: "_tb_id", value: String(id) },
+        ],
+        brushes: picked,
+      });
+      return { entity: map.entities.length - 1, brushes: picked.length };
+    })
+);
+
+tool(
+  "validate_map",
+  "Check a map without compiling: degenerate or non-convex brushes, tiny/huge brushes, brushes outside the declared level bounds (worldspawn level_size, metres, with level_units per metre), textures missing from an optional materials.json, and duplicate brushes. Returns a list of issues with entity/brush indices.",
+  {
+    map_path: mapPathSchema,
+    materials_path: z.string().optional().describe("Path to godot/data/materials.json; texture names are checked against material ids"),
+  },
+  ({ map_path, materials_path }) => {
+    const map = loadMap(map_path);
+    const issues: { entity: number; brush: number; problem: string }[] = [];
+    const world = map.entities[0];
+    const units = Number(getProp(world, "level_units") ?? 8);
+    const size = (getProp(world, "level_size") ?? "").split(/\s+/).map(Number);
+    let known: Set<string> | null = null;
+    if (materials_path) {
+      const j = JSON.parse(fs.readFileSync(materials_path, "utf8"));
+      known = new Set<string>((j.materials ?? j).map((m: { id: string }) => m.id));
+    }
+    const seen = new Map<string, number>();
+    map.entities.forEach((e, ei) => {
+      e.brushes.forEach((b, bi) => {
+        const add = (problem: string) => issues.push({ entity: ei, brush: bi, problem });
+        const s = solidFromBrush(b);
+        const polys = polygons(s);
+        if (b.faces.length < 4) add("fewer than 4 faces");
+        if (polys.length < 4 || !isValidSolid(s)) { add("degenerate (zero volume or open)"); return; }
+        if (polys.length < b.faces.length) add(`${b.faces.length - polys.length} face(s) contribute no area (redundant planes)`);
+        const bb = brushBounds(b);
+        if (bb) {
+          const dims = [0, 1, 2].map((i) => bb.max[i] - bb.min[i]);
+          if (Math.min(...dims) < 1) add(`thinner than 1 unit (${Math.min(...dims).toFixed(2)})`);
+          if (size.length === 3 && size.every((x) => x > 0)) {
+            const lim = [size[0] * units, size[2] * units, size[1] * units]; // map x, y(level z), z(level y)
+            for (let i = 0; i < 3; i++) if (bb.min[i] < -0.5 || bb.max[i] > lim[i] + 0.5) { add(`outside level bounds on map axis ${"xyz"[i]}`); break; }
+          }
+        }
+        for (const f of b.faces) if (known && !known.has(f.texture) && !["__TB_empty", "clip", "skip"].includes(f.texture)) { add(`unknown material "${f.texture}"`); break; }
+        const key = JSON.stringify(brushBounds(b)) + b.faces.map((f) => f.texture).sort().join();
+        if (seen.has(key)) add(`duplicate of entity ${seen.get(key)! >> 16} brush ${seen.get(key)! & 0xffff}`);
+        else seen.set(key, (ei << 16) | bi);
+      });
+    });
+    return { brushes: map.entities.reduce((n, e) => n + e.brushes.length, 0), issues: issues.slice(0, 200), issueCount: issues.length };
+  }
 );
 
 // ---------- start ----------

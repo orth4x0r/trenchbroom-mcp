@@ -43,3 +43,33 @@ test("bevel removes volume and adds faces; rotation keeps volume", () => {
   const bb = brushBounds(brush);
   assert.ok(bb.max[0] - bb.min[0] > 32);
 });
+
+import { solidFromPoints, pipePoints, stairBoxes, archPoints, transformBrush } from "../dist/map/csg.js";
+
+test("hull of a cube's corners is the cube; pipe is a prism; stairs fill a wedge-ish volume", () => {
+  const pts = []; for (const x of [0, 8]) for (const y of [0, 8]) for (const z of [0, 8]) pts.push([x, y, z]);
+  near(solidVolume(solidFromPoints(pts, "t", true)), 512, 0.1);
+  const pipe = solidFromPoints(pipePoints([0, 0, 0], [0, 0, 100], 10, 8), "t", true);
+  assert.equal(polygons(pipe).length, 10);
+  const slanted = solidFromPoints(pipePoints([0, 0, 0], [60, 40, 30], 5, 6), "t", true);
+  assert.ok(solidVolume(slanted) > 0 && polygons(slanted).length === 8);
+  const steps = stairBoxes([0, 0, 0], [64, 32, 32], "+x", 4);
+  assert.equal(steps.length, 4);
+  near(steps[3].max[2], 32);
+});
+
+test("arch segments are valid convex solids", () => {
+  const segs = archPoints([0, 0, 0], "x", 24, 40, 16, 8);
+  assert.equal(segs.length, 8);
+  for (const s of segs) assert.ok(solidVolume(solidFromPoints(s, "t", true)) > 10);
+});
+
+test("clone with mirror keeps outward winding (positive volume, same size)", () => {
+  const b = brushFromSolid(boxSolid([0, 0, 0], [16, 8, 4], "t", true), "t", true);
+  const m = transformBrush(b, 0, [0, 0, 0], [0, 0, 0], "x");
+  near(solidVolume(solidFromBrush(m)), 16 * 8 * 4, 0.1);
+  const bb = brushBounds(m);
+  near(bb.min[0], -16);
+  const r = transformBrush(b, 90, [10, 0, 0], [0, 0, 0]);
+  near(solidVolume(solidFromBrush(r)), 16 * 8 * 4, 0.1);
+});
