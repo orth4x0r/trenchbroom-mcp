@@ -328,14 +328,14 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | Stairs, arches, catwalks (deck, rails, legs) | add_stairs, add_arch, add_catwalk | done |
 | Pipes/beams at any angle, columns, n-gons | add_pipe, add_brush_cylinder, add_brush_prism | done |
 | Any convex shape (chamfered pillars, tapered legs) | add_brush_hull | done |
-| Chamfer/bevel all edges | bevel_brush | done (per-edge selection: todo) |
+| Chamfer/bevel, per edge set | bevel_brush (all, vertical, horizontal, top, bottom) | done |
 | Rooms, doors, windows, trenches (CSG) | hollow_brush, subtract_box, subtract_path | done |
 | Clip/split, rotate, mirror, arrays | clip_brush, rotate_brush, clone_brushes | done |
-| Groups | group_brushes | done (layers: todo) |
-| Entities + key/values (spawn, light, prop, door...) | add_entity, set_entity_properties, FGD tools | done (game FGD: todo) |
-| Texture, scale, rotation, offset | set_face_texture | done (fit-to-face: todo) |
+| Groups, layers | group_brushes, add_layer, move_to_layer | done |
+| Entities + key/values (spawn, light, prop, door...) | add_entity, set_entity_properties, FGD tools | done; game FGD in the game repo (godot/tools/brush/kickback.fgd) |
+| Texture, scale, rotation, offset | set_face_texture | done, incl. fit_tiles |
 | Grid/snap | `snap` flag on every shape tool | done |
 | Validation | validate_map (degenerate, thin, bounds, unknown material, duplicates); compile_map for leaks | done |
 | Fast previews | render_preview (2D SVG), render_shaded (3D PNG) | done |
 | Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |
-| Terrain seam (sink below heightfield) | | todo (lives in the importer) |
+| Terrain seam (sink feet, contact paint) | game repo godot/tools/map-level.mjs `--seam` | done |
