@@ -530,6 +530,22 @@ function pushSolid(map: MapFile, mapPath: string, e: Entity, solid: Solid, textu
   return e.brushes.length - 1;
 }
 
+function layerEntity(map: MapFile, name: string): Entity {
+  const found = map.entities.find((e) => getProp(e, "_tb_type") === "_tb_layer" && getProp(e, "_tb_name") === name);
+  if (found) return found;
+  const id = Math.max(0, ...map.entities.map((e) => Number(getProp(e, "_tb_id") ?? 0))) + 1;
+  const sort = map.entities.filter((e) => getProp(e, "_tb_type") === "_tb_layer").length + 1;
+  const layer: Entity = {
+    properties: [
+      { key: "classname", value: "func_group" }, { key: "_tb_type", value: "_tb_layer" }, { key: "_tb_name", value: name },
+      { key: "_tb_id", value: String(id) }, { key: "_tb_layer_sort_index", value: String(sort) },
+    ],
+    brushes: [],
+  };
+  map.entities.push(layer);
+  return layer;
+}
+
 function brushAt(e: Entity, i: number) {
   const b = e.brushes[i];
   if (!b) throw new Error(`no brush at index ${i} (entity has ${e.brushes.length})`);
@@ -1193,11 +1209,12 @@ tool(
     base_texture: z.string(), cornice_texture: z.string().optional(), rib_texture: z.string().optional(),
     bevel: z.number().positive().optional().describe("Default 0.4 units"),
     openings: z.array(z.object({ min: vec3Schema, max: vec3Schema })).optional(),
+    layer: z.string().optional().describe('Layer the trim goes into; default "Visual trim". Brushes in a layer whose name starts with "Visual" become render-only in the game (no collision, no nav).'),
     entity_index: entSchema, snap: snapSchema,
   },
-  ({ map_path, min, max, base_height, cornice_height, depth, rib_every, rib_width, pilasters, base_texture, cornice_texture, rib_texture, bevel, openings, entity_index, snap }) =>
+  ({ map_path, min, max, base_height, cornice_height, depth, rib_every, rib_width, pilasters, base_texture, cornice_texture, rib_texture, bevel, openings, layer, entity_index, snap }) =>
     withMap(map_path, (map) => {
-      const e = entityAt(map, entity_index ?? 0);
+      const e = layerEntity(map, layer ?? "Visual trim");
       const valve = shouldWriteValve(map, map_path);
       const bh = base_height ?? 2, ch = cornice_height ?? 2, dp = depth ?? 1, bv = bevel ?? 0.4;
       const ct = cornice_texture ?? base_texture, rt = rib_texture ?? base_texture;
