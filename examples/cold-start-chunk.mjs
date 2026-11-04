@@ -30,20 +30,29 @@ const call = async (name, args) => {
 const box = (x, y, z, w, h, d, texture) => call("add_brush_box", { ...BOX(x, y, z, w, h, d), texture });
 const cut = (x, y, z, w, h, d, tex = "cast_concrete") => call("subtract_box", { ...BOX(x, y, z, w, h, d), cut_texture: tex });
 // A solid mass then hollowed: a room with 1 m walls, floor and ceiling.
-const room = async (x, y, z, w, h, d, tex) => {
+const room = async (x, y, z, w, h, d, tex, mats = {}) => {
   const r = await box(x - 1, y - 1, z - 1, w + 2, h + 2, d + 2, tex);
-  await call("hollow_brush", { entity_index: 0, brush_index: r.brushIndex, wall: U, inner_texture: tex });
+  const hol = await call("hollow_brush", { entity_index: 0, brush_index: r.brushIndex, wall: U, inner_texture: tex });
+  // Per-face materials: the floor slab gets the floor texture on top, the ceiling slab gets its own underneath,
+  // and a base trim runs round the foot of the walls.
+  const list = await call("list_brushes", { entity_index: 0 });
+  const mine = list.slice(r.brushIndex, r.brushIndex + hol.walls);
+  const zin = [BOX(x, y, z, w, h, d).min[2], BOX(x, y, z, w, h, d).max[2]];
+  for (const b of mine) {
+    if (mats.floor && Math.abs(b.max[2] - zin[0]) < 0.01) await call("set_face_texture", { entity_index: 0, brush_index: b.index, faces: "+z", texture: mats.floor });
+    if (mats.ceil && Math.abs(b.min[2] - zin[1]) < 0.01) await call("set_face_texture", { entity_index: 0, brush_index: b.index, faces: "-z", texture: mats.ceil });
+  }
 };
 
 // A / Maintenance Bay
-await room(12, 1, 8, 22, 7, 16, "panel");
+await room(12, 1, 8, 22, 7, 16, "panel", { floor: "concrete", ceil: "dark_steel" });
 await box(12, 1, 8, 22, 3, 2, "dark_steel"); await box(12, 1, 22, 10, 2, 2, "teal_steel");
 await box(26, 1, 20, 4, 1, 4, "grate"); await box(28, 2, 21, 2, 1, 3, "grate");
 await call("add_entity", { classname: "info_player_start", origin: P(17, 1.02, 16), properties: { angle: "90" } });
 await call("add_entity", { classname: "light", origin: P(22, 7, 16), properties: { light: "300", _color: "0.9 0.72 0.45" } });
 
 // B / Service Corridor with pipe racks, an arched mouth, a hazard-striped floor strip
-await room(35, 1, 13, 36, 6, 6, "dark_steel");
+await room(35, 1, 13, 36, 6, 6, "dark_steel", { floor: "grate", ceil: "panel" });
 await cut(34, 1, 14, 1, 4, 4);                                         // doorway from the bay
 await call("add_arch", { center: P(34.5, 1 + 2.5, 16), axis: "y", inner: 2 * U, outer: 2.6 * U, depth: 1 * U, segments: 8, texture: "orange_trim" });
 for (const z of [14.2, 17.8]) await call("add_pipe", { from: P(35, 5, z), to: P(71, 5, z), radius: 0.35 * U, sides: 8, texture: "pipe" });
