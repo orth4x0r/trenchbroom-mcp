@@ -35,7 +35,7 @@ export function serializeMap(map: MapFile): string {
   map.entities.forEach((e, ei) => {
     lines.push(`// entity ${ei}`, "{");
     for (const p of e.properties) {
-      lines.push(p.raw ?? `"${p.key}" "${p.value}"`);
+      lines.push(p.raw ?? `"${p.key}" "${p.value.replace(/(?<!\\)"/g, "\\\"")}"`);   // a bare quote would end the value: escape it as TrenchBroom does
     }
     e.brushes.forEach((b, bi) => {
       lines.push(`// brush ${bi}`, "{");
