@@ -404,7 +404,7 @@ Both read a `tbmcp.json` found next to or above the map (or `config_path`, or `T
 `{level}` is the map's file name without `.map` (or the `level` argument), `{map}` the absolute map path, `{report}` a
 temp file the command writes JSON to. The KICKBACK Afterglow check merges the edit into the level and compares the
 game's own walking graph before and after: objectives cut off, detours, one-way traps and unreachable floor, with
-coordinates (about 18 s on its smallest chapter). Give the server the environment the command needs (for that game,
+coordinates (about 4 s on its smallest chapter and 50 s on its largest, 171k nav nodes; an edit that changes no collision returns at once). Give the server the environment the command needs (for that game,
 `GODOT`).
 
 A good agent loop: edit, `map_diff` to confirm the change is what was meant, `render_shaded` to look at it,
