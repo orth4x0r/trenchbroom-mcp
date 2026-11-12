@@ -47,3 +47,11 @@ test("seam: no kerb on a side that faces another brush, on a floating brush, on 
   const skip = planLips(m, slope(), { ...O, skipTextures: ["wall"] }, () => false);
   assert.equal(skip.lips.length, 0);
 });
+
+test("writer: a value holding bare quotes is escaped so the map still parses", async () => {
+  const { serializeMap } = await import("../dist/map/writer.js");
+  const m = world();
+  m.entities.push({ properties: [{ key: "classname", value: "kb_light" }, { key: "_json", value: '{"a":1,"b":\\"x\\"}' }], brushes: [] });
+  const back = parseMap(serializeMap(m));
+  assert.equal(back.entities[1].properties[1].value, '{\\"a\\":1,\\"b\\":\\"x\\"}');
+});
