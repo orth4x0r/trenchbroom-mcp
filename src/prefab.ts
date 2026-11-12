@@ -52,7 +52,7 @@ export function cachedBounds(b: Brush): Bounds | null {
   if (v === undefined) { v = brushBounds(b); boundsCache.set(b, v); }
   return v;
 }
-function cachedPlanes(b: Brush) {
+export function cachedPlanes(b: Brush) {
   let v = planesCache.get(b);
   if (!v) { v = b.faces.map((f) => planeFromPoints(f.points[0], f.points[1], f.points[2])); planesCache.set(b, v); }
   return v;
@@ -190,4 +190,33 @@ export function groundBelow(map: MapFile, terrain: Terrain | null, p: Vec3): { z
   const tz = terrain ? terrainHeight(terrain, p[0], p[1]) : null;
   if (tz !== null && tz <= p[2] + 1e-6 && tz > bz) return { z: tz, on: "terrain" };
   return hit ? { z: bz, on: `brush ${hit.entity}/${hit.brush}` } : null;
+}
+
+/** A 2D grid over brush footprints, for point and box queries on maps with tens of thousands of brushes. */
+export class BrushGrid {
+  private cells = new Map<string, { b: Brush; e: number; i: number }[]>();
+  constructor(map: MapFile, private size = 64, skip?: (e: Entity) => boolean) {
+    map.entities.forEach((e, ei) => {
+      if (!["worldspawn", "func_group"].includes(classname(e)) || skip?.(e)) return;
+      e.brushes.forEach((b, bi) => {
+        const bb = cachedBounds(b);
+        if (!bb) return;
+        for (let x = Math.floor(bb.min[0] / size); x <= Math.floor(bb.max[0] / size); x++)
+          for (let y = Math.floor(bb.min[1] / size); y <= Math.floor(bb.max[1] / size); y++) {
+            const k = x + "," + y;
+            (this.cells.get(k) ?? this.cells.set(k, []).get(k)!).push({ b, e: ei, i: bi });
+          }
+      });
+    });
+  }
+  near(x: number, y: number) { return this.cells.get(Math.floor(x / this.size) + "," + Math.floor(y / this.size)) ?? []; }
+  /** The brush containing p (strictly inside by eps), if any. */
+  inside(p: Vec3, eps = 0.01): { b: Brush; e: number; i: number } | null {
+    for (const it of this.near(p[0], p[1])) {
+      const bb = cachedBounds(it.b)!;
+      if (p.some((v, a) => v <= bb.min[a] + eps || v >= bb.max[a] - eps)) continue;
+      if (cachedPlanes(it.b).every((pl) => pl.normal[0] * p[0] + pl.normal[1] * p[1] + pl.normal[2] * p[2] < pl.dist - eps)) return it;
+    }
+    return null;
+  }
 }
