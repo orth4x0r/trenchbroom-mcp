@@ -19,6 +19,9 @@ import { parseFgd, resolveClass } from "./fgd/parser.js";
 import { compileMap } from "./compile.js";
 import { launchMap } from "./launch.js";
 import { compileShogoMap } from "./shogo.js";
+import { diffMaps } from "./map/diff.js";
+import { spawnSync, execFileSync } from "node:child_process";
+import * as os from "node:os";
 
 // KEEP THIS IN STEP WITH package.json. It is what a client reports back as
 // serverInfo, which makes it the only way to tell WHICH BUILD a running client
@@ -28,7 +31,7 @@ import { compileShogoMap } from "./shogo.js";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.6.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.7.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -1268,6 +1271,114 @@ tool(
       }
       return { trimBrushes: made };
     })
+);
+
+// ---------- project hooks: baseline diff and the game's own play check ----------
+//
+// An agent editing a level needs two answers after every change: what did I actually change, and does the level still
+// play. The second only the game can answer (its collision, its navigation, its rules), so the server does not guess:
+// a project drops a `tbmcp.json` next to (or above) its maps naming a baseline and a check command, and these tools
+// run them. Paths in it are relative to the file. Example:
+//   { "baselineRefFile": "BASELINE", "baselineGitPath": "godot/tools/brush/levels/{level}.map",
+//     "check": { "command": ["node", "../check-map.mjs", "{level}", "{map}", "--json", "{report}"], "timeoutSeconds": 900 } }
+// {level} is the map's file name without .map (or the `level` argument), {map} the absolute map path, {report} a temp
+// JSON file the command writes its findings to.
+
+interface ProjectConfig {
+  dir: string;
+  baselineRefFile?: string;
+  baselineRef?: string;
+  baselineGitPath?: string;
+  check?: { command: string[]; timeoutSeconds?: number };
+}
+
+function findConfig(mapPath: string, explicit?: string): ProjectConfig | null {
+  const file = explicit ?? process.env.TBMCP_CONFIG ?? (() => {
+    for (let d = path.dirname(path.resolve(mapPath)); ; d = path.dirname(d)) {
+      const f = path.join(d, "tbmcp.json");
+      if (fs.existsSync(f)) return f;
+      if (path.dirname(d) === d) return undefined;
+    }
+  })();
+  if (!file) return null;
+  return { ...JSON.parse(fs.readFileSync(file, "utf8")), dir: path.dirname(path.resolve(file)) };
+}
+
+const fill = (s: string, vars: Record<string, string>) => s.replace(/\{(\w+)\}/g, (m, k) => vars[k] ?? m);
+
+function loadBaseline(mapPath: string, opts: { baseline_path?: string; baseline_ref?: string; level?: string; config_path?: string }): { map: MapFile; from: string } {
+  if (opts.baseline_path) return { map: loadMap(opts.baseline_path), from: opts.baseline_path };
+  const cfg = findConfig(mapPath, opts.config_path);
+  const level = opts.level ?? path.basename(mapPath, ".map");
+  const ref = opts.baseline_ref ?? cfg?.baselineRef ?? (cfg?.baselineRefFile ? fs.readFileSync(path.resolve(cfg.dir, cfg.baselineRefFile), "utf8").trim() : undefined);
+  if (!ref) throw new Error("no baseline: pass baseline_path or baseline_ref, or add a tbmcp.json with baselineRef / baselineRefFile");
+  const cwd = cfg?.dir ?? path.dirname(path.resolve(mapPath));
+  let rel: string;
+  if (cfg?.baselineGitPath) rel = fill(cfg.baselineGitPath, { level });
+  else {
+    const top = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    rel = path.relative(top, path.resolve(mapPath)).split(path.sep).join("/");
+  }
+  const text = execFileSync("git", ["-C", cwd, "show", `${ref}:${rel}`], { encoding: "utf8", maxBuffer: 1 << 30 });
+  return { map: parseMap(text), from: `${ref}:${rel}` };
+}
+
+tool(
+  "map_diff",
+  "What changed in a map compared with a baseline: brushes added and removed (with bounds and layer), entities added, removed and changed (property by property). Brushes compare by geometry and texture, so re-saving in TrenchBroom or reordering is not a change. Baseline: baseline_path, or a git ref (baseline_ref, or the project's tbmcp.json baselineRef/baselineRefFile). Use it after a batch of edits to confirm you changed only what you meant to, and before check_map.",
+  {
+    map_path: mapPathSchema,
+    baseline_path: z.string().optional().describe("A .map file to compare against"),
+    baseline_ref: z.string().optional().describe("A git ref; the baseline is that ref's version of the map"),
+    level: z.string().optional().describe("Level id for tbmcp.json path templates; default the map's file name"),
+    config_path: z.string().optional().describe("tbmcp.json to use; default: searched upward from the map, or TBMCP_CONFIG"),
+    key_property: z.string().optional().describe('Entity property that identifies an entity across versions; default "id" (then "targetname")'),
+    limit: z.number().int().positive().optional().describe("Max items per list; default 100"),
+  },
+  ({ map_path, baseline_path, baseline_ref, level, config_path, key_property, limit }) => {
+    const base = loadBaseline(map_path, { baseline_path, baseline_ref, level, config_path });
+    const d = diffMaps(base.map, loadMap(map_path), key_property ?? "id");
+    const n = limit ?? 100;
+    return {
+      baseline: base.from,
+      summary: `${d.brushesAdded.length} brushes added, ${d.brushesRemoved.length} removed; entities +${d.entitiesAdded.length} -${d.entitiesRemoved.length} ~${d.entitiesChanged.length}`,
+      brushesAdded: d.brushesAdded.slice(0, n), brushesRemoved: d.brushesRemoved.slice(0, n),
+      entitiesAdded: d.entitiesAdded.slice(0, n), entitiesRemoved: d.entitiesRemoved.slice(0, n), entitiesChanged: d.entitiesChanged.slice(0, n),
+      unkeyedEntities: d.unkeyedEntities,
+    };
+  }
+);
+
+tool(
+  "check_map",
+  "Ask the game whether the edited map still plays. Runs the project's check command from tbmcp.json (for KICKBACK Afterglow: merge the edit into the level, build the game's own walking graph before and after, report objectives that lost their route, detours, one-way traps and unreachable floor, with coordinates). Returns the verdict, the findings and the command's report. Slow (seconds to minutes, the game does real work): run it after a meaningful batch of edits, not after every brush, and fix what it names before moving on.",
+  {
+    map_path: mapPathSchema,
+    level: z.string().optional().describe("Level id passed to the check; default the map's file name without .map"),
+    config_path: z.string().optional().describe("tbmcp.json to use; default: searched upward from the map, or TBMCP_CONFIG"),
+  },
+  ({ map_path, level, config_path }) => {
+    const cfg = findConfig(map_path, config_path);
+    if (!cfg?.check?.command?.length) throw new Error("no check configured: add tbmcp.json with check.command (searched upward from the map), or pass config_path");
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-check-"));
+    try {
+      const report = path.join(tmp, "report.json");
+      const vars = { level: level ?? path.basename(map_path, ".map"), map: path.resolve(map_path), report, mapdir: path.dirname(path.resolve(map_path)) };
+      const [cmd, ...rest] = cfg.check.command.map((a) => fill(a, vars));
+      const t0 = Date.now();
+      const r = spawnSync(cmd, rest, { cwd: cfg.dir, encoding: "utf8", maxBuffer: 1 << 28, timeout: (cfg.check.timeoutSeconds ?? 900) * 1000 });
+      const out = (r.stdout ?? "").split(/\r?\n/).filter(Boolean);
+      return {
+        exitCode: r.status, passed: r.status === 0, seconds: Math.round((Date.now() - t0) / 100) / 10,
+        output: out.slice(-40),
+        ...(r.status !== 0 && r.stderr ? { stderr: r.stderr.split(/\r?\n/).filter(Boolean).slice(-15) } : {}),
+        ...(r.error ? { error: String(r.error) } : {}),
+        report: fs.existsSync(report) ? JSON.parse(fs.readFileSync(report, "utf8")) : null,
+      };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
 );
 
 // ---------- start ----------

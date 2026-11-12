@@ -381,6 +381,35 @@ overlaps.
 `examples/cold-start-chunk.mjs` rebuilds a real level section using only these
 tool calls, as a worked example of driving them from an MCP client.
 
+## Project hooks: what did I change, and does it still play?
+
+Geometry tools can't tell an agent whether a level still works; only the game can. Two tools close that loop
+without baking any one game's rules into the server:
+
+- `map_diff` compares the map with a baseline (a file, or a git ref) and lists brushes added and removed (bounds,
+  layer, textures) and entities added, removed and changed property by property. Brushes compare by planes and
+  textures, so re-saving in TrenchBroom or reordering brushes is not a change.
+- `check_map` runs the project's own check command and returns its verdict, its output and its JSON report.
+
+Both read a `tbmcp.json` found next to or above the map (or `config_path`, or `TBMCP_CONFIG`), paths relative to it:
+
+```json
+{
+  "baselineRefFile": "BASELINE",
+  "baselineGitPath": "godot/tools/brush/levels/{level}.map",
+  "check": { "command": ["node", "../check-map.mjs", "{level}", "{map}", "--json", "{report}"], "timeoutSeconds": 1800 }
+}
+```
+
+`{level}` is the map's file name without `.map` (or the `level` argument), `{map}` the absolute map path, `{report}` a
+temp file the command writes JSON to. The KICKBACK Afterglow check merges the edit into the level and compares the
+game's own walking graph before and after: objectives cut off, detours, one-way traps and unreachable floor, with
+coordinates (about 4 s on its smallest chapter and 50 s on its largest, 171k nav nodes; an edit that changes no collision returns at once). Give the server the environment the command needs (for that game,
+`GODOT`).
+
+A good agent loop: edit, `map_diff` to confirm the change is what was meant, `render_shaded` to look at it,
+`check_map` after each meaningful batch, fix what it names.
+
 ## Fork notes (orth4x0r)
 
 This fork adds CSG brush tools (`src/map/csg.ts`: wedge, prism, cylinder, rotate, clip, subtract, hollow, bevel, face texture) for the KICKBACK Afterglow level pipeline.
@@ -408,5 +437,7 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | Grid/snap | `snap` flag on every shape tool | done |
 | Validation | validate_map (degenerate, thin, bounds, unknown material, duplicates); compile_map for leaks | done |
 | Fast previews | render_preview (2D SVG), render_shaded (3D PNG) | done |
+| What changed vs a baseline | map_diff (geometric brush identity, entity property diff) | done |
+| Does it still play (game's own rules) | check_map, via the project's tbmcp.json (the game repo's check-map.mjs) | done |
 | Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |
 | Terrain seam (sink feet, contact paint) | game repo godot/tools/map-level.mjs `--seam` | done |
