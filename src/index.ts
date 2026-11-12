@@ -21,7 +21,7 @@ import { launchMap } from "./launch.js";
 import { compileShogoMap } from "./shogo.js";
 import { diffMaps } from "./map/diff.js";
 import { planLips } from "./seam.js";
-import { groundBelow, type Terrain, groupEntity, instance, listPrefabs, loadPrefab, overlaps, placedSockets, raycast, rotZ, snapToSocket, type Placement, type Socket } from "./prefab.js";
+import { cachedBounds, groundBelow, type Terrain, groupEntity, instance, listPrefabs, loadPrefab, overlaps, placedSockets, raycast, rotZ, snapToSocket, type Placement, type Socket } from "./prefab.js";
 import { spawnSync, execFileSync } from "node:child_process";
 import * as os from "node:os";
 
@@ -33,7 +33,7 @@ import * as os from "node:os";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.9.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.10.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -89,8 +89,15 @@ function entitySummary(e: Entity, index: number) {
   };
 }
 
+/** A handler result that also carries images (shown to the agent inline): { ...data, [IMAGES]: [{ path, mimeType }] }. */
+const IMAGES = Symbol("images");
 function ok(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+  const images = (data as any)?.[IMAGES] as { path: string; mimeType: string }[] | undefined;
+  // Pretty for small results, compact for big ones (a region or a diff can be tens of KB of indentation).
+  const pretty = JSON.stringify(data, null, 2);
+  const content: any[] = [{ type: "text" as const, text: pretty.length > 4000 ? JSON.stringify(data) : pretty }];
+  for (const im of images ?? []) if (fs.existsSync(im.path)) content.push({ type: "image", data: fs.readFileSync(im.path).toString("base64"), mimeType: im.mimeType });
+  return { content };
 }
 
 function toolError(err: unknown) {
@@ -1292,8 +1299,11 @@ interface ProjectConfig {
   baselineRef?: string;
   baselineGitPath?: string;
   check?: { command: string[]; timeoutSeconds?: number };
+  look?: { command: string[]; timeoutSeconds?: number; image?: string };
   prefabs?: string;
   terrain?: string;
+  /** The game's own coordinates (Godot style: metres, Y up, map -Y = +Z): map (x, y, z) = (lx*u, (size[2] - lz)*u, ly*u). */
+  levelCoords?: { unitsPerMetre: number; levelJson: string; sizeKey?: string };
 }
 
 function findConfig(mapPath: string, explicit?: string): ProjectConfig | null {
@@ -1639,6 +1649,119 @@ tool(
       }
       return { layer: name, lips: made, replaced, brushesTouched: plan.brushes, segments: plan.sides, metres: Math.round(plan.lips.reduce((a, l) => a + Math.max(l.max[0] - l.min[0], l.max[1] - l.min[1]), 0) / 8) };
     });
+  }
+);
+
+
+// ---------- seeing and asking: look_at, describe_region ----------
+
+function levelXf(cfg: ProjectConfig | null, level: string) {
+  const lc = cfg?.levelCoords;
+  if (!cfg || !lc) return null;
+  const f = path.resolve(cfg.dir, fill(lc.levelJson, { level }));
+  if (!fs.existsSync(f)) return null;
+  const size = JSON.parse(fs.readFileSync(f, "utf8"))[lc.sizeKey ?? "size"] as number[];
+  const u = lc.unitsPerMetre, sz = size[2];
+  return {
+    size, u,
+    toMap: ([x, y, z]: number[]): Vec3 => [x * u, (sz - z) * u, y * u],
+    toLevel: ([x, y, z]: number[]): Vec3 => [x / u, z / u, sz - y / u],
+  };
+}
+const r2 = (v: number) => Math.round(v * 100) / 100;
+
+tool(
+  "look_at",
+  "See part of a level the way a player does: the project's look command (tbmcp.json \"look\"; for KICKBACK Afterglow, the game's real shaders) picks clear stand-points round the target (open ground near its floor, head room, clear line of sight, no clutter at the lens) and renders them. The image comes back inline: rows are views; with `before` (a git ref such as origin/godot-port, or a level file) the columns are before | after. map_path's edit is applied first (entities, collision); brush looks show only after a bake. Takes about 2 minutes per column. Use it to judge wayfinding, framing and whether an edit reads, instead of aiming cameras by hand.",
+  {
+    map_path: mapPathSchema,
+    target: z.string().describe('An entity id from the level, or level coordinates "x,y,z" (metres, Y up)'),
+    level: z.string().optional(), before: z.string().optional().describe("Git ref or level file to render the same views from, for a before | after pair"),
+    config_path: z.string().optional(),
+  },
+  ({ map_path, target, level, before, config_path }) => {
+    const cfg = findConfig(map_path, config_path);
+    if (!cfg?.look?.command?.length) throw new Error("no look command: add \"look\" to the project's tbmcp.json");
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-look-"));
+    const vars = { level: level ?? path.basename(map_path, ".map"), map: path.resolve(map_path), target, out, before: before ?? "", beforeFlag: before ? "--before" : "" };
+    const [cmd, ...rest] = cfg.look.command.map((a) => fill(a, vars)).filter((a) => a !== "");
+    const t0 = Date.now();
+    const r = spawnSync(cmd, rest, { cwd: cfg.dir, encoding: "utf8", maxBuffer: 1 << 28, timeout: (cfg.look.timeoutSeconds ?? 900) * 1000 });
+    const line = (r.stdout ?? "").split(/\r?\n/).find((l) => l.startsWith("LOOK "));
+    if (r.status !== 0 || !line) throw new Error(`look failed (exit ${r.status}): ${((r.stderr ?? "") + (r.stdout ?? "")).split(/\r?\n/).filter(Boolean).slice(-8).join(" | ")}`);
+    const res = JSON.parse(line.slice(5));
+    const image = cfg.look.image ? fill(cfg.look.image, vars) : res.image;
+    return { ...res, seconds: Math.round((Date.now() - t0) / 1000), [IMAGES]: [{ path: image, mimeType: image.endsWith(".png") ? "image/png" : "image/jpeg" }] };
+  }
+);
+
+tool(
+  "describe_region",
+  "What is in a box of the map, in one call: brushes (index, bounds, textures, layer), point entities (class, id, origin), and a floor-height grid (highest brush top or terrain under each sample, and the clear height above it). With the project's levelCoords (tbmcp.json), give and get the game's own coordinates (metres, Y up) by setting coords to \"level\"; otherwise map units. Use it before an edit instead of guessing where floors, walls and props are.",
+  {
+    map_path: mapPathSchema,
+    min: vec3Schema.describe("Box corner (in `coords`)"), max: vec3Schema.describe("Opposite corner"),
+    coords: z.enum(["level", "map"]).optional().describe('Default "level" when the project defines levelCoords, else "map"'),
+    step: z.number().positive().optional().describe("Floor grid spacing in the same units; default 1 m (8 map units); at most 40 x 40 samples"),
+    level: z.string().optional(), config_path: z.string().optional(),
+    max_items: z.number().int().positive().optional().describe("Cap per list; default 80"),
+  },
+  ({ map_path, min, max, coords, step, level, config_path, max_items }) => {
+    const map = loadMap(map_path);
+    const cfg = findConfig(map_path, config_path);
+    const lvl = level ?? path.basename(map_path, ".map");
+    const xf = levelXf(cfg, lvl);
+    const useLevel = (coords ?? (xf ? "level" : "map")) === "level";
+    if (useLevel && !xf) throw new Error("no levelCoords in tbmcp.json (or its level file is missing): use coords \"map\"");
+    const toMap = (p: number[]) => (useLevel ? xf!.toMap(p) : (p as Vec3));
+    const out = (p: number[]) => (useLevel ? xf!.toLevel(p) : p).map(r2);
+    const a = toMap(min as number[]), b = toMap(max as number[]);
+    const lo: Vec3 = [0, 1, 2].map((i) => Math.min(a[i], b[i])) as Vec3, hi: Vec3 = [0, 1, 2].map((i) => Math.max(a[i], b[i])) as Vec3;
+    const cap = max_items ?? 80;
+    const layerName = (e: Entity) => {
+      const id = getProp(e, "_tb_type") === "_tb_layer" ? getProp(e, "_tb_id") : getProp(e, "_tb_layer");
+      if (!id) return undefined;
+      const l = map.entities.find((x) => getProp(x, "_tb_type") === "_tb_layer" && getProp(x, "_tb_id") === id);
+      return l ? getProp(l, "_tb_name") : undefined;
+    };
+    const brushes: any[] = [];
+    let brushCount = 0;
+    map.entities.forEach((e, ei) => e.brushes.forEach((br, bi) => {
+      const bb = cachedBounds(br);
+      if (!bb || [0, 1, 2].some((i) => bb.max[i] <= lo[i] || bb.min[i] >= hi[i])) return;
+      brushCount++;
+      if (brushes.length >= cap) return;
+      const c1 = out(bb.min), c2 = out(bb.max);
+      brushes.push({ entity: ei, brush: bi, min: c1.map((v, i) => Math.min(v, c2[i])), max: c1.map((v, i) => Math.max(v, c2[i])),
+        textures: [...new Set(br.faces.map((f) => f.texture))], ...(layerName(e) ? { layer: layerName(e) } : {}), ...(classname(e) !== "worldspawn" ? { class: classname(e) } : {}) });
+    }));
+    const ents: any[] = [];
+    map.entities.forEach((e, ei) => {
+      const o = parseOrigin(e);
+      if (!o || [0, 1, 2].some((i) => o[i] < lo[i] || o[i] > hi[i]) || ents.length >= cap) return;
+      ents.push({ entity: ei, class: classname(e), ...(getProp(e, "id") ? { id: getProp(e, "id") } : {}), ...(getProp(e, "label") ? { label: getProp(e, "label") } : {}), origin: out(o) });
+    });
+    // Floor grid over the box's footprint: highest surface under the box top, and clear height above it.
+    const terrain = loadTerrain(map_path, lvl, config_path);
+    const st = step ? (useLevel ? step * xf!.u : step) : (xf?.u ?? 8);
+    const nx = Math.min(40, Math.max(1, Math.round((hi[0] - lo[0]) / st))), ny = Math.min(40, Math.max(1, Math.round((hi[1] - lo[1]) / st)));
+    // Compact rows (cheap to read): one height per sample, "-" for no ground, "^" suffix where head room < 2 m.
+    const rows: string[] = [];
+    const headroom = 2 * (xf?.u ?? 8);
+    for (let j = 0; j < ny; j++) {
+      const cells: string[] = [];
+      for (let i = 0; i < nx; i++) {
+        const x = lo[0] + (i + 0.5) * st, y = lo[1] + (j + 0.5) * st;
+        const g = x <= hi[0] && y <= hi[1] ? groundBelow(map, terrain, [x, y, hi[2]]) : null;
+        if (!g) { cells.push("-"); continue; }
+        const up = raycast(map, [x, y, g.z + 0.1], [0, 0, 1], headroom);
+        cells.push(String(r2(useLevel ? g.z / xf!.u : g.z)) + (up ? "^" : ""));
+      }
+      rows.push(cells.join(" "));
+    }
+    const first = out([lo[0] + 0.5 * st, lo[1] + 0.5 * st, 0]);
+    const floor = { note: useLevel ? `row r, column c samples level x = ${r2(first[0])} + c*${r2(st / xf!.u)}, z = ${r2(first[2])} - r*${r2(st / xf!.u)}; values are floor y (m); ^ = under 2 m head room` : `row r, column c samples map x = ${r2(lo[0] + 0.5 * st)} + c*${st}, y = ${r2(lo[1] + 0.5 * st)} + r*${st}; values are floor z; ^ = under 2 m head room`, rows };
+    return { coords: useLevel ? "level (metres, Y up)" : "map units (Z up)", brushes: { count: brushCount, list: brushes }, entities: ents, floor };
   }
 );
 
