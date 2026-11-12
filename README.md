@@ -381,6 +381,24 @@ overlaps.
 `examples/cold-start-chunk.mjs` rebuilds a real level section using only these
 tool calls, as a worked example of driving them from an MCP client.
 
+## Kitbash: prefabs with sockets
+
+A prefab is a small .map in a library folder (tbmcp.json `"prefabs"`, or `prefab_dir`): worldspawn brushes are the
+piece, facing +x, origin = its anchor on the floor (a wall piece's back on x = 0), and `prefab_socket` point entities
+(`name`, `origin`, `angle` = outward facing) mark where other pieces join. Optional worldspawn keys `prefab_mount`
+(floor, wall, free) and `prefab_note`.
+
+- `list_prefabs`: the library, plus open sockets of instances already placed in a map.
+- `place_prefab`: `socket` (join to a placed instance's socket: origins meet, facings oppose), `wall` (cast from a
+  point to the first wall, mount flush facing back into the room, drop to the floor), `floor` (drop onto the surface
+  below, settle to the lowest ground under the footprint), `at` (explicit). Floor drops include a project heightfield
+  (tbmcp.json `"terrain"`: `{origin:[x,y], cell:[dx,dy], nx, ny, z:[...]}` in map units). Refuses placements that
+  overlap existing brushes (touching is fine) and names them; turns snap to 90 degrees unless `free_yaw`. The instance
+  is a TrenchBroom group carrying its sockets (`_prefab_sockets`), so later pieces can snap to it.
+- `extract_prefab`: harvest a group or a region of a map into the library, with sockets.
+
+Ray and overlap queries cache brush bounds and planes; on a 36k-brush map a placement takes about 1.3 s.
+
 ## Project hooks: what did I change, and does it still play?
 
 Geometry tools can't tell an agent whether a level still works; only the game can. Two tools close that loop
@@ -437,6 +455,7 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | Grid/snap | `snap` flag on every shape tool | done |
 | Validation | validate_map (degenerate, thin, bounds, unknown material, duplicates); compile_map for leaks | done |
 | Fast previews | render_preview (2D SVG), render_shaded (3D PNG) | done |
+| Kitbash prefabs with sockets, wall/floor/terrain snapping, overlap refusal | list_prefabs, place_prefab, extract_prefab | done |
 | What changed vs a baseline | map_diff (geometric brush identity, entity property diff) | done |
 | Does it still play (game's own rules) | check_map, via the project's tbmcp.json (the game repo's check-map.mjs) | done |
 | Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |

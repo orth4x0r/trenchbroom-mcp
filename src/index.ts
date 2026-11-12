@@ -20,6 +20,7 @@ import { compileMap } from "./compile.js";
 import { launchMap } from "./launch.js";
 import { compileShogoMap } from "./shogo.js";
 import { diffMaps } from "./map/diff.js";
+import { groundBelow, type Terrain, groupEntity, instance, listPrefabs, loadPrefab, overlaps, placedSockets, raycast, rotZ, snapToSocket, type Placement, type Socket } from "./prefab.js";
 import { spawnSync, execFileSync } from "node:child_process";
 import * as os from "node:os";
 
@@ -31,7 +32,7 @@ import * as os from "node:os";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.7.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.8.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -1290,6 +1291,8 @@ interface ProjectConfig {
   baselineRef?: string;
   baselineGitPath?: string;
   check?: { command: string[]; timeoutSeconds?: number };
+  prefabs?: string;
+  terrain?: string;
 }
 
 function findConfig(mapPath: string, explicit?: string): ProjectConfig | null {
@@ -1378,6 +1381,197 @@ tool(
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  }
+);
+
+// ---------- kitbash: prefab library, snap placement ----------
+
+function prefabDir(mapPath: string | undefined, dir?: string, configPath?: string): string {
+  if (dir) return dir;
+  const cfg = mapPath || configPath ? findConfig(mapPath ?? configPath!, configPath) : null;
+  if (cfg?.prefabs) return path.resolve(cfg.dir, cfg.prefabs);
+  throw new Error("no prefab library: pass prefab_dir, or add \"prefabs\": \"<folder>\" to the project's tbmcp.json");
+}
+
+function loadTerrain(mapPath: string, level?: string, configPath?: string): Terrain | null {
+  const cfg = findConfig(mapPath, configPath);
+  if (!cfg?.terrain) return null;
+  const f = path.resolve(cfg.dir, fill(cfg.terrain, { level: level ?? path.basename(mapPath, ".map") }));
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null;
+}
+
+const DIRS: Record<string, Vec3> = { "+x": [1, 0, 0], "-x": [-1, 0, 0], "+y": [0, 1, 0], "-y": [0, -1, 0] };
+
+tool(
+  "list_prefabs",
+  "The kitbash library: each prefab's name, mount (floor, wall or free), note, size and sockets (named join points with an outward angle). Prefabs are small .map files (see place_prefab); the folder comes from prefab_dir or the project's tbmcp.json \"prefabs\". Also lists sockets of prefabs already placed in map_path that nothing is joined to yet.",
+  { map_path: z.string().optional().describe("A level map: also list its placed instances' open sockets"), prefab_dir: z.string().optional(), config_path: z.string().optional() },
+  ({ map_path, prefab_dir, config_path }) => {
+    const lib = listPrefabs(prefabDir(map_path, prefab_dir, config_path)).map((p) => ({
+      name: p.name, mount: p.mount, note: p.note, brushes: p.brushes.length,
+      size: p.bounds ? p.bounds.max.map((v, i) => v - p.bounds!.min[i]) : null, sockets: p.sockets,
+    }));
+    if (!map_path) return { prefabs: lib };
+    const placed = placedSockets(loadMap(map_path));
+    const all = placed.flatMap((g) => g.sockets.map((s) => ({ ...s, group: g.group, groupName: g.name })));
+    const key = (s: Socket) => s.origin.map((v) => Math.round(v)).join(",");
+    const count = new Map<string, number>();
+    for (const s of all) count.set(key(s), (count.get(key(s)) ?? 0) + 1);
+    return { prefabs: lib, openSockets: all.filter((s) => count.get(key(s)) === 1) };
+  }
+);
+
+tool(
+  "place_prefab",
+  "Kitbash: place a library prefab as a TrenchBroom group, snapped instead of guessed. Modes: \"socket\" joins one of its sockets to a socket of an instance already placed (target_group by entity index or name, target_socket), so catwalks, stairs and gantries chain without gaps; \"wall\" casts from `point` along `direction` to the first wall, puts the prefab's back flush against it facing into the room, and drops it to the floor below (stairs against walls, door frames, pipe racks); \"floor\" drops it from `point` onto the surface below, turned by `yaw`. Floor and wall drops land on brushes or on the project's heightfield terrain (tbmcp.json \"terrain\"), and settle to the lowest ground under the footprint on slopes; \"at\" uses origin and yaw as given. Refuses when the result overlaps existing brushes with real volume (touching is fine) and lists them, unless allow_overlap. Returns the group, its sockets in map coordinates, and what it touches. Run check_map after a batch of placements." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, prefab: z.string(), prefab_dir: z.string().optional(), config_path: z.string().optional(),
+    mode: z.enum(["socket", "wall", "floor", "at"]),
+    origin: vec3Schema.optional(), yaw: z.number().optional().describe("Degrees about z; the prefab faces +x at 0"),
+    point: vec3Schema.optional().describe("wall/floor modes: a point in open space (inside the room, above the floor)"),
+    direction: z.enum(["+x", "-x", "+y", "-y"]).optional().describe("wall mode: which way the wall is from point"),
+    max_distance: z.number().positive().optional().describe("wall mode: farthest the wall may be from point, default 128 units (16 m at 8 per metre)"),
+    target_group: z.union([z.number().int(), z.string()]).optional(), target_socket: z.string().optional(),
+    socket: z.string().optional().describe("socket mode: this prefab's socket that joins (default its first)"),
+    grid: z.number().positive().optional().describe("Round the placement to this grid (along the wall only in wall mode)"),
+    allow_overlap: z.boolean().optional(), layer: z.string().optional().describe("Existing layer name to put the group in"),
+    level: z.string().optional().describe("Level id for the project's terrain sidecar; default the map's file name"),
+    free_yaw: z.boolean().optional().describe("Keep a yaw that is not a multiple of 90 (default: snapped)"),
+  },
+  ({ map_path, prefab, prefab_dir, config_path, level, free_yaw, mode, origin, yaw, point, direction, max_distance, target_group, target_socket, socket, grid, allow_overlap, layer }) =>
+    withMap(map_path, (map) => {
+      const p = loadPrefab(path.join(prefabDir(map_path, prefab_dir, config_path), prefab.endsWith(".map") ? prefab : prefab + ".map"));
+      const snap = (v: number) => (grid ? Math.round(v / grid) * grid : v);
+      let pl: Placement;
+      const notes: string[] = [];
+      const terrain = loadTerrain(map_path, level, config_path);
+      // On uneven ground, sit the piece on the lowest ground under its footprint corners (legs bury into the rise instead
+      // of hanging over the dip); corners over a drop of more than `step` are reported, not followed.
+      const settle = (at: Placement, on: string) => {
+        if (!p.bounds) return;
+        const step = 8, lo = p.bounds.min, hi = p.bounds.max, c = at.origin;
+        let zmin = c[2]; const hanging: string[] = [];
+        for (const [x, y] of [[lo[0], lo[1]], [hi[0], lo[1]], [lo[0], hi[1]], [hi[0], hi[1]]]) {
+          const w = rotZ([x, y, 0], at.yaw);
+          const g = groundBelow(map, terrain, [c[0] + w[0], c[1] + w[1], c[2] + step]);
+          if (!g || g.z < c[2] - step) { hanging.push(`(${(c[0] + w[0]).toFixed(0)}, ${(c[1] + w[1]).toFixed(0)})`); continue; }
+          zmin = Math.min(zmin, g.z);
+        }
+        if (zmin < c[2] - 0.01) notes.push(`sunk ${(c[2] - zmin).toFixed(1)} units to the lowest ground under its footprint (slope)`);
+        c[2] = zmin;
+        notes.push(`standing on ${on}`);
+        if (hanging.length) notes.push(`footprint corners over a drop: ${hanging.join(" ")}`);
+      };
+      // The game's walking graph is a 2 m column grid: a stair or deck turned 30 degrees came out unreachable for enemies
+      // on Afterglow Open where the same build at 0 degrees played. Turns snap to 90 unless free_yaw.
+      const turn = (y: number | undefined) => {
+        const v = y ?? 0;
+        if (free_yaw || v % 90 === 0) return v;
+        const r = Math.round(v / 90) * 90;
+        notes.push(`yaw ${v} snapped to ${r} (pass free_yaw to keep it; check_map will tell you if enemies can still use it)`);
+        return r;
+      };
+      if (mode === "at") {
+        if (!origin) throw new Error("at mode needs origin");
+        pl = { origin: (origin as Vec3).map(snap) as Vec3, yaw: turn(yaw) };
+      } else if (mode === "floor") {
+        if (!point) throw new Error("floor mode needs point");
+        const q: Vec3 = [snap(point[0]), snap(point[1]), point[2]];
+        const g = groundBelow(map, terrain, q);
+        if (!g) throw new Error(`no floor below ${q}`);
+        pl = { origin: [q[0], q[1], g.z], yaw: turn(yaw) };
+        settle(pl, g.on);
+      } else if (mode === "wall") {
+        if (!point || !direction) throw new Error("wall mode needs point and direction");
+        const d = DIRS[direction];
+        const hit = raycast(map, point as Vec3, d, max_distance ?? 128);
+        if (!hit) throw new Error(`no wall within ${max_distance ?? 128} units from ${point} toward ${direction}`);
+        if (hit.t < 1e-6) throw new Error(`point ${point} is inside a brush (entity ${hit.entity} brush ${hit.brush}); start from open space`);
+        const n = hit.normal;
+        if (n[0] * d[0] + n[1] * d[1] < -0.99) { /* square wall, as expected */ } else notes.push(`wall face is not square to ${direction} (normal ${n.map((v) => v.toFixed(2))}); placed square to the cast`);
+        const at: Vec3 = [point[0] + d[0] * hit.t, point[1] + d[1] * hit.t, point[2]];
+        if (grid) { if (d[0]) at[1] = snap(at[1]); else at[0] = snap(at[0]); }
+        const down = groundBelow(map, terrain, [at[0] - d[0] * 0.5, at[1] - d[1] * 0.5, at[2]]);
+        if (!down) throw new Error(`no floor below the wall point ${at}`);
+        at[2] = down.z;
+        pl = { origin: at, yaw: Math.round((Math.atan2(-d[1], -d[0]) * 180) / Math.PI) };
+        settle(pl, down.on);
+      } else {
+        const groups = placedSockets(map);
+        const g = typeof target_group === "number" ? groups.find((x) => x.group === target_group) : groups.find((x) => x.name === target_group);
+        if (!g) throw new Error(`no placed prefab group ${target_group} (placed: ${groups.map((x) => `${x.group}:${x.name}`).join(", ") || "none"})`);
+        const t = g.sockets.find((s) => s.name === target_socket) ?? (target_socket ? undefined : g.sockets[0]);
+        if (!t) throw new Error(`${g.name} has no socket "${target_socket}" (has: ${g.sockets.map((s) => s.name).join(", ")})`);
+        pl = snapToSocket(p, socket ?? p.sockets[0]?.name ?? "", t);
+      }
+      const inst = instance(p, pl);
+      const hits = overlaps(map, inst.brushes, new Set());
+      if (hits.length && !allow_overlap)
+        throw new Error(`${p.name} at ${pl.origin} yaw ${pl.yaw} would overlap ${hits.length} brush(es): ${JSON.stringify(hits.slice(0, 8))}. Move it, pick another wall/socket, or pass allow_overlap.`);
+      let layerId: string | undefined;
+      if (layer) {
+        const l = map.entities.find((e) => getProp(e, "_tb_type") === "_tb_layer" && getProp(e, "_tb_name") === layer);
+        if (!l) throw new Error(`no layer named "${layer}" (add_layer first)`);
+        layerId = getProp(l, "_tb_id");
+      }
+      const n = map.entities.filter((e) => getProp(e, "_prefab") === p.name).length + 1;
+      const name = `${p.name}#${n}`;
+      map.entities.push(groupEntity(map, name, p.name, inst.brushes, inst.sockets, layerId));
+      return { group: map.entities.length - 1, name, origin: pl.origin, yaw: pl.yaw, brushes: inst.brushes.length, sockets: inst.sockets, ...(hits.length ? { overlaps: hits.slice(0, 20) } : {}), ...(notes.length ? { notes } : {}) };
+    })
+);
+
+tool(
+  "extract_prefab",
+  "Harvest a kitbash piece from a map into the prefab library: the brushes of a group (entity_index) or every world brush fully inside min..max, moved so `anchor` becomes the prefab origin and turned by `yaw` so the piece faces +x (a wall piece's back on x = 0). Add sockets (map coordinates of the source map, with an outward angle) where other pieces should join. Writes <prefab_dir>/<name>.map; does not change the source map.",
+  {
+    map_path: mapPathSchema, name: z.string().regex(/^[a-z0-9_]+$/), prefab_dir: z.string().optional(), config_path: z.string().optional(),
+    entity_index: z.number().int().optional(), min: vec3Schema.optional(), max: vec3Schema.optional(),
+    anchor: vec3Schema, yaw: z.number().optional().describe("Degrees to turn the piece about the anchor so it faces +x"),
+    mount: z.enum(["floor", "wall", "free"]).optional(), note: z.string().optional(),
+    sockets: z.array(z.object({ name: z.string(), origin: vec3Schema, angle: z.number() })).optional(),
+    overwrite: z.boolean().optional(),
+  },
+  ({ map_path, name, prefab_dir, config_path, entity_index, min, max, anchor, yaw, mount, note, sockets, overwrite }) => {
+    const map = loadMap(map_path);
+    let picked: Brush[];
+    if (entity_index !== undefined) picked = entityAt(map, entity_index).brushes;
+    else {
+      if (!min || !max) throw new Error("give entity_index, or min and max");
+      picked = map.entities.filter((e) => ["worldspawn", "func_group"].includes(classname(e))).flatMap((e) => e.brushes).filter((b) => {
+        const bb = brushBounds(b);
+        return bb && [0, 1, 2].every((a) => bb.min[a] >= min[a] - 0.01 && bb.max[a] <= max[a] + 0.01);
+      });
+    }
+    if (!picked.length) throw new Error("no brushes picked");
+    const a = anchor as Vec3, turn = yaw ?? 0;
+    const neg: Vec3 = [-a[0], -a[1], -a[2]];
+    const r3 = (v: number) => Math.round(v * 1000) / 1000;
+    const moved = picked.map((b) => {
+      const t = transformBrush(transformBrush(b, 0, neg, [0, 0, 0]), turn, [0, 0, 0], [0, 0, 0]);
+      for (const f of t.faces) f.points = f.points.map((q) => q.map(r3)) as [Vec3, Vec3, Vec3];
+      return t;
+    });
+    const out: MapFile = {
+      header: map.header.length ? map.header : ["// Game: Quake", "// Format: Valve"], eol: map.eol,
+      entities: [{
+        properties: [{ key: "classname", value: "worldspawn" }, { key: "mapversion", value: "220" }, { key: "prefab_mount", value: mount ?? "floor" },
+          ...(note ? [{ key: "prefab_note", value: note }] : []), ...["level_units"].flatMap((k) => (getProp(map.entities[0], k) ? [{ key: k, value: getProp(map.entities[0], k)! }] : []))],
+        brushes: moved,
+      }, ...(sockets ?? []).map((s) => {
+        const o = s.origin as Vec3;
+        const local: Vec3 = [o[0] - a[0], o[1] - a[1], o[2] - a[2]];
+        const c = Math.cos((turn * Math.PI) / 180), sn = Math.sin((turn * Math.PI) / 180);
+        const lo = [r3(local[0] * c - local[1] * sn), r3(local[0] * sn + local[1] * c), r3(local[2])];
+        return { properties: [{ key: "classname", value: "prefab_socket" }, { key: "name", value: s.name }, { key: "origin", value: lo.join(" ") }, { key: "angle", value: String((((s.angle + turn) % 360) + 360) % 360) }], brushes: [] };
+      })],
+    };
+    const dir = prefabDir(map_path, prefab_dir, config_path);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name + ".map");
+    if (fs.existsSync(file) && !overwrite) throw new Error(`${file} exists; pass overwrite`);
+    atomicWrite(file, serializeMap(out));
+    return { file, brushes: moved.length, sockets: (sockets ?? []).length };
   }
 );
 
