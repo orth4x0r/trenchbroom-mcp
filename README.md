@@ -435,8 +435,22 @@ game's own walking graph before and after: objectives cut off, detours, one-way 
 coordinates (about 4 s on its smallest chapter and 50 s on its largest, 171k nav nodes; an edit that changes no collision returns at once). Give the server the environment the command needs (for that game,
 `GODOT`).
 
-A good agent loop: edit, `map_diff` to confirm the change is what was meant, `render_shaded` to look at it,
-`check_map` after each meaningful batch, fix what it names.
+Two more hooks answer "where am I" and "what does it look like in the game":
+
+- `describe_region` (no command needed) lists what is in a box: brushes (bounds, textures, layer), entities, and a
+  floor-height grid (the top surface under each sample, `-` for none, `^` where there is under 2 m of head room).
+  With tbmcp.json `"levelCoords"` (`{"unitsPerMetre": 8, "levelJson": "...{level}.json", "sizeKey": "size"}`) it
+  takes and reports the game's own coordinates (`coords: "level"`).
+- `look_at` runs the project's `"look"` command (`{"command": [...], "timeoutSeconds": 900, "image": "{out}/look.jpg"}`,
+  vars `{level} {map} {target} {out} {before} {beforeFlag}`) and returns the picture as an image: the game picks a
+  stand-point with a clear view of the target (an entity id or a point) and renders it through its own shaders,
+  before (a git ref) and after the edit side by side. KICKBACK Afterglow: about 3 min per column.
+
+Tool results over 4 KB come back as compact JSON.
+
+A good agent loop: `describe_region` to see the floors and what is there, edit, `map_diff` to confirm the change is
+what was meant, `check_map` after each meaningful batch, `look_at` with `before` to see it as a player would, fix what
+they name.
 
 ## Fork notes (orth4x0r)
 
@@ -469,5 +483,7 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | What changed vs a baseline | map_diff (geometric brush identity, entity property diff) | done |
 | Does it still play (game's own rules) | check_map, via the project's tbmcp.json (the game repo's check-map.mjs) | done |
 | Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |
+| Where am I: floors, head room, brushes, entities, game coordinates | describe_region | done |
+| See it as the player will (game shaders, auto camera, before/after) | look_at, via tbmcp.json `look` | done |
 | Plinths where walls meet terrain | add_seam_lips (terrain sidecar, sloped kerbs, exposed sides only, rerunnable) | done |
 | Terrain seam (sink feet, contact paint) | game repo godot/tools/map-level.mjs `--seam` | done |
