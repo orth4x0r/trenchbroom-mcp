@@ -399,6 +399,16 @@ piece, facing +x, origin = its anchor on the floor (a wall piece's back on x = 0
 
 Ray and overlap queries cache brush bounds and planes; on a 36k-brush map a placement takes about 1.3 s.
 
+### Seam lips
+
+- `add_seam_lips`: where brush walls stand in the project heightfield, pour a plinth along each exposed side: a kerb
+  `depth` out from the wall, buried `bury` below the lowest ground, `height` above it, its top sloping with the ground
+  (one hull per straight run, top edges bevelled). Skips sides that face another brush, rotated faces, brushes that
+  float above or sink below the ground, slabs under `min_height`, Visual layers and `skip_textures` (rock: cliffs grow
+  out of the ground). The kerbs go into one layer (default `Visual seam`, render-only in the game), and a rerun
+  replaces them, so it is safe after a terrain or wall edit. `dry_run` reports counts and metres. Defaults: 0.375 m out, 0.5 m
+  above ground (map units 3 and 4).
+
 ## Project hooks: what did I change, and does it still play?
 
 Geometry tools can't tell an agent whether a level still works; only the game can. Two tools close that loop
@@ -459,4 +469,5 @@ Derived from what the five campaign levels contain (hulls, floors, chamfers, box
 | What changed vs a baseline | map_diff (geometric brush identity, entity property diff) | done |
 | Does it still play (game's own rules) | check_map, via the project's tbmcp.json (the game repo's check-map.mjs) | done |
 | Cold Start chunk through MCP only | examples/cold-start-chunk.mjs | done (38 calls, 0 validation issues) |
+| Plinths where walls meet terrain | add_seam_lips (terrain sidecar, sloped kerbs, exposed sides only, rerunnable) | done |
 | Terrain seam (sink feet, contact paint) | game repo godot/tools/map-level.mjs `--seam` | done |

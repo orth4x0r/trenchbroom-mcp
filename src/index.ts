@@ -20,6 +20,7 @@ import { compileMap } from "./compile.js";
 import { launchMap } from "./launch.js";
 import { compileShogoMap } from "./shogo.js";
 import { diffMaps } from "./map/diff.js";
+import { planLips } from "./seam.js";
 import { groundBelow, type Terrain, groupEntity, instance, listPrefabs, loadPrefab, overlaps, placedSockets, raycast, rotZ, snapToSocket, type Placement, type Socket } from "./prefab.js";
 import { spawnSync, execFileSync } from "node:child_process";
 import * as os from "node:os";
@@ -32,7 +33,7 @@ import * as os from "node:os";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.8.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.9.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -1572,6 +1573,72 @@ tool(
     if (fs.existsSync(file) && !overwrite) throw new Error(`${file} exists; pass overwrite`);
     atomicWrite(file, serializeMap(out));
     return { file, brushes: moved.length, sockets: (sockets ?? []).length };
+  }
+);
+
+// ---------- seams: where brush walls meet heightfield terrain ----------
+
+tool(
+  "add_seam_lips",
+  "Pour plinths where brush walls stand in heightfield terrain the .map does not contain (the project's terrain sidecar, tbmcp.json \"terrain\"). A hard straight wall-ground line on bumpy ground reads as a blockout; a real builder casts a low kerb that hugs the wall, buries itself in the ground and steps with it. Along each exposed axis-aligned side of each brush the terrain crosses, in `segment`-long pieces: a kerb from `bury` below the lowest ground to `height` above it, its top sloping with the ground, `depth` out from the wall, top edges bevelled. Sides facing another brush, brushes standing on or sunk below the ground, rotated faces and Visual layers are skipped; similar neighbouring segments merge. The lips go in their own layer (default \"Visual seam\": render-only in the game, so collision and nav don't change). Re-running replaces that layer's previous lips (or the region's, with `region`). dry_run reports without writing." + EDITOR_NOTE,
+  {
+    map_path: mapPathSchema, level: z.string().optional().describe("Level id for the terrain sidecar; default the map's file name"), config_path: z.string().optional(),
+    height: z.number().positive().optional().describe("Kerb height above the ground; default 4 (map units, 8 = 1 m)"),
+    depth: z.number().positive().optional().describe("How far it stands out from the wall; default 3 (renderers often drop slivers: the Kickback refine skips hulls under 0.35 m)"),
+    bury: z.number().nonnegative().optional().describe("How far below the lowest ground it goes; default 4"),
+    segment: z.number().positive().optional().describe("Piece length (steps with the ground); default 16"),
+    min_height: z.number().positive().optional().describe("Brushes shorter than this get none (slabs, kerbs); default 16"),
+    bevel: z.number().nonnegative().optional().describe("Top-edge chamfer; default 0.75"),
+    texture: z.string().optional().describe("Default: the wall face's own texture"),
+    skip_textures: z.array(z.string()).optional().describe("Walls whose face has one of these textures get none (e.g. rock: cliffs grow out of the ground)"),
+    region: z.object({ min: z.tuple([z.number(), z.number()]), max: z.tuple([z.number(), z.number()]) }).optional().describe("Only brushes overlapping this x/y box"),
+    layer: z.string().optional().describe('Default "Visual seam"'),
+    dry_run: z.boolean().optional(),
+  },
+  ({ map_path, level, config_path, height, depth, bury, segment, min_height, bevel, texture, skip_textures, region, layer, dry_run }) => {
+    const terrain = loadTerrain(map_path, level, config_path);
+    if (!terrain) throw new Error("no terrain sidecar for this map (tbmcp.json \"terrain\", e.g. levels/terrain/{level}.json from export-terrain.mjs)");
+    const name = layer ?? "Visual seam";
+    const o = { height: height ?? 4, depth: depth ?? 3, bury: bury ?? 4, segment: segment ?? 16, minHeight: min_height ?? 16, skipTextures: skip_textures, region };
+    const run = (map: MapFile) => {
+      const isLip = (e: Entity) => getProp(e, "_tb_type") === "_tb_layer" && getProp(e, "_tb_name") === name;
+      const plan = planLips(map, terrain, o, isLip);
+      return { plan, isLip };
+    };
+    if (dry_run) {
+      const { plan } = run(loadMap(map_path));
+      return { dryRun: true, lips: plan.lips.length, brushesTouched: plan.brushes, segments: plan.sides, metres: Math.round(plan.lips.reduce((a, l) => a + Math.max(l.max[0] - l.min[0], l.max[1] - l.min[1]), 0) / 8), sample: plan.lips.slice(0, 5) };
+    }
+    return withMap(map_path, (map) => {
+      const e = layerEntity(map, name);
+      // replace earlier lips (inside the region, if given) so a re-run after a terrain or wall edit is clean
+      const before = e.brushes.length;
+      e.brushes = e.brushes.filter((b) => {
+        if (!region) return false;
+        const bb = brushBounds(b);
+        return !bb || bb.max[0] < region.min[0] || bb.min[0] > region.max[0] || bb.max[1] < region.min[1] || bb.min[1] > region.max[1];
+      });
+      const replaced = before - e.brushes.length;
+      const { plan } = run(map);
+      const valve = shouldWriteValve(map, map_path);
+      let made = 0;
+      for (const l of plan.lips) {
+        const tex = texture ?? l.texture;
+        // eight corners: flat buried bottom, top sloping along the wall from l.top[0] to l.top[1]
+        const along = l.side[1] === "x" ? 1 : 0;
+        const pts: Vec3[] = [];
+        for (const a of [l.min[along], l.max[along]]) for (const c of [l.min[1 - along], l.max[1 - along]]) for (const z of [l.min[2], a === l.min[along] ? l.top[0] : l.top[1]]) {
+          const p: Vec3 = [0, 0, z]; p[along] = a; p[1 - along] = c; pts.push(p);
+        }
+        let s = solidFromPoints(pts, tex, valve);
+        const bv = Math.min(bevel ?? 0.75, o.depth / 2 - 0.01, (l.max[2] - l.min[2]) / 2 - 0.01);
+        if (bv > 0.05) { const b2 = bevelSolid(s, bv, tex, valve, "top"); if (isValidSolid(b2)) s = b2; }
+        if (!isValidSolid(s)) continue;
+        e.brushes.push(brushFromSolid(s, tex, valve, false));
+        made++;
+      }
+      return { layer: name, lips: made, replaced, brushesTouched: plan.brushes, segments: plan.sides, metres: Math.round(plan.lips.reduce((a, l) => a + Math.max(l.max[0] - l.min[0], l.max[1] - l.min[1]), 0) / 8) };
+    });
   }
 );
 
