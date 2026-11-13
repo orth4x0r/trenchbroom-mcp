@@ -33,7 +33,7 @@ import * as os from "node:os";
 // dist/trenchbroom-mcp.mjs, which the Shogo kit ships). Rebuilding one and not
 // the other left a client running five-day-old code while the source, the
 // bundle and the tests all said the fix was in. `npm run dist` builds both.
-const server = new McpServer({ name: "trenchbroom-mcp", version: "0.10.0" });
+const server = new McpServer({ name: "trenchbroom-mcp", version: "0.11.0" });
 
 // Appended to every tool that WRITES the map file.
 //
@@ -1672,18 +1672,19 @@ const r2 = (v: number) => Math.round(v * 100) / 100;
 
 tool(
   "look_at",
-  "See part of a level the way a player does: the project's look command (tbmcp.json \"look\"; for KICKBACK Afterglow, the game's real shaders) picks clear stand-points round the target (open ground near its floor, head room, clear line of sight, no clutter at the lens) and renders them. The image comes back inline: rows are views; with `before` (a git ref such as origin/godot-port, or a level file) the columns are before | after. map_path's edit is applied first (entities, collision); brush looks show only after a bake. Takes about 2 minutes per column. Use it to judge wayfinding, framing and whether an edit reads, instead of aiming cameras by hand.",
+  "See part of a level the way a player does: the project's look command (tbmcp.json \"look\"; for KICKBACK Afterglow, the game's real shaders) picks clear stand-points round the target (open ground near its floor, head room, clear line of sight, no clutter at the lens) and renders them. The image comes back inline: rows are views; with `before` (a git ref such as origin/godot-port, or a level file) the columns are before | after. map_path's edit is applied first (entities, collision); brush looks show only after a bake. `flags` sets story state first (a gate open, a survey done) so gated lamps and glows show. The first look at a level boots a render server (~2.5 min); later looks take seconds per view. Use it to judge wayfinding, framing and whether an edit reads, instead of aiming cameras by hand.",
   {
     map_path: mapPathSchema,
     target: z.string().describe('An entity id from the level, or level coordinates "x,y,z" (metres, Y up)'),
     level: z.string().optional(), before: z.string().optional().describe("Git ref or level file to render the same views from, for a before | after pair"),
+    flags: z.array(z.string()).optional().describe("Story flags to set before rendering (project vars {flags} comma-joined, {flagsFlag})"),
     config_path: z.string().optional(),
   },
-  ({ map_path, target, level, before, config_path }) => {
+  ({ map_path, target, level, before, flags, config_path }) => {
     const cfg = findConfig(map_path, config_path);
     if (!cfg?.look?.command?.length) throw new Error("no look command: add \"look\" to the project's tbmcp.json");
     const out = fs.mkdtempSync(path.join(os.tmpdir(), "tbmcp-look-"));
-    const vars = { level: level ?? path.basename(map_path, ".map"), map: path.resolve(map_path), target, out, before: before ?? "", beforeFlag: before ? "--before" : "" };
+    const vars = { level: level ?? path.basename(map_path, ".map"), map: path.resolve(map_path), target, out, before: before ?? "", beforeFlag: before ? "--before" : "", flags: (flags ?? []).join(","), flagsFlag: flags?.length ? "--flags" : "" };
     const [cmd, ...rest] = cfg.look.command.map((a) => fill(a, vars)).filter((a) => a !== "");
     const t0 = Date.now();
     const r = spawnSync(cmd, rest, { cwd: cfg.dir, encoding: "utf8", maxBuffer: 1 << 28, timeout: (cfg.look.timeoutSeconds ?? 900) * 1000 });
