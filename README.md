@@ -279,8 +279,8 @@ or a generator running continuously while you hand-detail, both work.
 
 ### The honest ceiling
 
-It can't do rotated or non-box geometry, so it greyboxes rather than finishes.
-It has no aesthetic judgement: it'll place lights at perfect intervals, which
+Brushes are convex, as in the format, so detail comes from CSG (see below)
+rather than curves or patches. It has no aesthetic judgement: it'll place lights at perfect intervals, which
 is exactly what a good mapper wouldn't do. And it can't play the level, so
 nothing it makes has been evaluated for whether it's *fun*.
 
@@ -295,12 +295,15 @@ npm test
 
 ## Limitations
 
-- Brushes are convex, as in the format itself. Curved surfaces are
-  approximated with n-gon prisms and hulls; there are no patches or brush
+- Brushes are convex, as in the Quake map format itself (a TrenchBroom limit,
+  not this server's). Curved surfaces are approximated with n-gon prisms,
+  hulls and CSG (clip, subtract, bevel); there are no patches or brush
   entities with their own geometry tools beyond grouping.
 - Texture alignment is controlled per face by `set_face_texture`; there is no
   automatic alignment across adjacent faces.
-- Editing a map by hand while the server is also editing it is not supported.
+- TrenchBroom does not reload a changed file by itself (see the patched build
+  above), and editing a map by hand while the server is also editing it is
+  not supported: the last save wins.
 - Compiling needs ericw-tools installed separately; it is not bundled, and
   launching needs an engine and the game data it expects.
 - Launching has only been proven against a stand-in engine, not a real Quake
@@ -308,7 +311,8 @@ npm test
 
 ## Roadmap
 
-- More brush primitives (wedge, cylinder), rotation, texture retargeting.
+- Automatic texture alignment across adjacent faces. (Wedge, cylinder,
+  rotation and face retargeting are done: see CSG and construction tools.)
 - Upstreaming the editor patch: proposed in
   [TrenchBroom#5453](https://github.com/TrenchBroom/TrenchBroom/issues/5453),
   starting with a simplified reload dialog per maintainer feedback. (#3505 asked
