@@ -442,9 +442,9 @@ Two more hooks answer "where am I" and "what does it look like in the game":
   With tbmcp.json `"levelCoords"` (`{"unitsPerMetre": 8, "levelJson": "...{level}.json", "sizeKey": "size"}`) it
   takes and reports the game's own coordinates (`coords: "level"`).
 - `look_at` runs the project's `"look"` command (`{"command": [...], "timeoutSeconds": 900, "image": "{out}/look.jpg"}`,
-  vars `{level} {map} {target} {out} {before} {beforeFlag}`) and returns the picture as an image: the game picks a
+  vars `{level} {map} {target} {out} {before} {beforeFlag} {flags} {flagsFlag}`) and returns the picture as an image: the game picks a
   stand-point with a clear view of the target (an entity id or a point) and renders it through its own shaders,
-  before (a git ref) and after the edit side by side. KICKBACK Afterglow: about 3 min per column.
+  before (a git ref) and after the edit side by side, optionally with story flags set. KICKBACK Afterglow keeps a render server warm: ~2.5 min for the first look at a level, then seconds per view.
 
 Tool results over 4 KB come back as compact JSON.
 
